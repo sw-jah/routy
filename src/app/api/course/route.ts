@@ -60,16 +60,13 @@ async function searchNearbyCategory(
   }
 }
 
-// 2. 카카오 키워드 검색 (좌표, 반경, 거리순 정렬 지원)
+// 2. 카카오 키워드 검색
 async function searchKakaoPlaces(
   query: string,
   options: SearchOptions = {}
 ): Promise<Place[]> {
   const kakaoApiKey = process.env.KAKAO_REST_API_KEY;
-  if (!kakaoApiKey) {
-    console.error("❌ [API Key 누락] KAKAO_REST_API_KEY가 설정되지 않았습니다.");
-    return [];
-  }
+  if (!kakaoApiKey) return [];
 
   const { count = 10, lat, lng, radius, sort = "accuracy" } = options;
 
@@ -133,12 +130,12 @@ async function searchKakaoPlaces(
       };
     });
   } catch (error) {
-    console.error("❌ [Kakao API 네트워크 오류]:", error);
+    console.error("Kakao API 에러:", error);
     return [];
   }
 }
 
-// 3. 고정 장소 실제 좌표 보정
+// 3. 고정 장소의 실제 좌표 보정
 async function resolvePlaceCoordinates(
   place: Place,
   location: string
@@ -245,11 +242,11 @@ export async function POST(req: Request) {
       dessert = "",
       cafeAtmosphere = "",
       activityPace = "액티비티",
-      activityEnvironment = "야외",
+      activityEnvironment = "실내",
       fixedPlaces = [],
     } = body;
 
-    // 카카오 로컬 검색 최적화 테마 키워드 매핑
+    // 카카오 로컬 검색 최적화 테마 키워드
     const rawDessertOption = (cafeDessert || dessert || cafeAtmosphere || "").trim();
     let searchCategoryKeyword = "디저트 카페";
     if (rawDessertOption.includes("베이커리") || rawDessertOption.includes("빵")) {
@@ -266,7 +263,7 @@ export async function POST(req: Request) {
       searchCategoryKeyword = "디저트 카페";
     }
 
-    // 1. 고정 장소 카테고리 정규화 및 실제 위경도 보정
+    // 1. 고정 장소 카테고리 정규화 및 실제 좌표 보정
     const normalizedFixedPlaces: Place[] = await Promise.all(
       (fixedPlaces || []).map(async (p: Place) => {
         let cat = String(p.category || "").toUpperCase();
@@ -310,37 +307,57 @@ export async function POST(req: Request) {
     let cafeCandidates: Place[] = [];
     let activityCandidates: Place[] = [];
 
-    // [1단계: 식사 후보군 검색]
+// [1단계: 식사 후보군 검색]
     if (includeDining) {
       if (fixedDining) {
         diningCandidates = [fixedDining];
       } else {
-        const foodKeyword = cuisine?.[0] ? `${location} ${cuisine[0]} 맛집` : `${location} 맛집`;
-        const rawResults = await searchKakaoPlaces(foodKeyword, { count: 15 });
+        let menuSuffix = "";
+        if (diningOption === "밥") menuSuffix = " 덮밥 솥밥 백반 가정식";
+        else if (diningOption === "면") menuSuffix = " 파스타 라멘 국수";
+        else if (diningOption === "기타") menuSuffix = " 수제버거 타코 피자 멕시칸 화덕피자";
 
-        // 찻집, 디저트 샵 등이 식당으로 잘못 유입되는 현상 차단
-        const filteredDining = rawResults.filter((p) => {
-          const sub = p.subCategory || "";
-          const name = p.name || "";
-          return (
-            p.category === "RESTAURANT" &&
-            !sub.includes("카페") &&
-            !sub.includes("찻집") &&
-            !sub.includes("디저트") &&
-            !sub.includes("제과") &&
-            !name.includes("카페") &&
-            !name.includes("티룸")
+        const baseFood = cuisine?.[0] ? `${cuisine[0]}` : "";
+        const foodKeyword = `${location} ${baseFood}${menuSuffix} 맛집`.replace(/\s+/g, " ").trim();
+
+        // 1차: 키워드 검색
+        let rawResults = await searchKakaoPlaces(foodKeyword, { count: 15 });
+
+        // 💡 카페/제과/음료 관련 일체 배제
+        const diningBannedWords = [
+          "카페", "베이커리", "제과", "빵", "커피", "디저트", "아이스크림", 
+          "호프", "주점", "포차", "술집", "찻집", "티룸", "샌드위치"
+        ];
+
+        let filteredDining = rawResults.filter((p) => {
+          const sub = (p.subCategory || "").toLowerCase();
+          const name = (p.name || "").toLowerCase();
+          const isBanned = diningBannedWords.some(
+            (bad) => sub.includes(bad) || name.includes(bad)
           );
+          return p.category === "RESTAURANT" && !isBanned;
         });
 
-        diningCandidates = shuffleArray(
-          filteredDining.length > 0 ? filteredDining : rawResults
-        ).slice(0, 4);
+        if (filteredDining.length < 3) {
+          const backupDining = await searchKakaoPlaces(`${location} ${baseFood || "식당"} 맛집`, { count: 10 });
+          const extra = backupDining.filter((p) => {
+            const sub = (p.subCategory || "").toLowerCase();
+            const name = (p.name || "").toLowerCase();
+            return p.category === "RESTAURANT" && !diningBannedWords.some(b => sub.includes(b) || name.includes(b));
+          });
+          filteredDining = [...filteredDining, ...extra];
+        }
+
+        // 중복 장소 제거
+        const uniqueDining = Array.from(
+          new Map(filteredDining.map((p) => [p.name, p])).values()
+        );
+
+        diningCandidates = shuffleArray(uniqueDining).slice(0, 5);
       }
     }
 
-    // [2단계: 연쇄 기준점(Chain Anchor) 도출]
-    // 사용자가 장소를 고정하지 않았더라도 1단계 선발 장소를 기준으로 도보권(750m) 바인딩
+    // [2단계: 연쇄 기준점(Anchor) 도출]
     const resolvedAnchorPlace =
       fixedDining ||
       diningCandidates[0] ||
@@ -353,49 +370,39 @@ export async function POST(req: Request) {
         ? {
             lat: resolvedAnchorPlace.lat,
             lng: resolvedAnchorPlace.lng,
-            radius: 750, // 750m 반경 제한 (도보 약 9~10분 이내)
+            radius: 900, // 800m 반경 제한
             sort: "distance" as const,
           }
         : {};
 
-    // [3단계: 카페 후보군 검색 - 앵커 인근 도보권 + 프랜차이즈 필터링]
+    // [3단계: 카페 후보군 검색]
     if (includeCafe) {
       if (fixedCafe) {
         cafeCandidates = [fixedCafe];
       } else {
         let results: Place[] = [];
         const majorBrands = [
-          "스타벅스",
-          "투썸플레이스",
-          "메가커피",
-          "컴포즈커피",
-          "빽다방",
-          "이디야",
-          "할리스",
+          "스타벅스", "투썸플레이스", "메가커피", "컴포즈커피", "빽다방", "이디야", "할리스"
         ];
 
-        // 쿼리에 항상 `${location}`을 포함하여 타 자치구 이탈 방지
         const scopedCafeQuery = `${location} ${searchCategoryKeyword}`.trim();
 
-        // 1순위: 앵커 좌표 기준 반경 750m 거리순 검색
         results = await searchKakaoPlaces(scopedCafeQuery, {
           ...chainAnchor,
           count: 15,
         });
 
-        // 2순위: 반경 검색 결과 부족 시 카카오 공식 카테고리(CE7)로 인근 매장 보충
         if (results.length < 3 && chainAnchor.lat && chainAnchor.lng) {
           const categoryResults = await searchNearbyCategory(
             "CE7",
             chainAnchor.lat,
             chainAnchor.lng,
-            750,
+            800,
             12
           );
           results = [...results, ...categoryResults];
         }
 
-        // 3순위: 그래도 부족할 경우 지역 키워드 검색
         if (results.length === 0) {
           results = await searchKakaoPlaces(`${location} 카페`, { count: 10 });
         }
@@ -404,7 +411,6 @@ export async function POST(req: Request) {
           new Map(results.map((p) => [p.name, p])).values()
         );
 
-        // 개인 카페 필터링
         if (cafeType.includes("개인")) {
           const filtered = uniqueResults.filter(
             (p) => !majorBrands.some((brand) => p.name.includes(brand))
@@ -414,63 +420,58 @@ export async function POST(req: Request) {
           results = uniqueResults;
         }
 
-        cafeCandidates = shuffleArray(results).slice(0, 4);
+        cafeCandidates = shuffleArray(results).slice(0, 5);
       }
     }
 
-    // [4단계: 놀거리 후보군 검색 - 2x2 취향 매트릭스 + 시공/철물 블랙리스트 필터링]
+    // [4단계: 놀거리 후보군 검색 - 실내/야외 엄격 분리]
     if (includeActivity) {
       if (fixedActivity) {
         activityCandidates = [fixedActivity];
       } else {
         const activityKeywordMap: Record<string, string[]> = {
-          "액티비티_실내": ["방탈출", "보드게임카페", "볼링장", "원데이클래스"],
-          "액티비티_야외": ["자전거 대여", "산책로", "테마파크"],
-          "잔잔한 힐링_실내": ["전시회", "독립서점", "소품편집숍", "공방체험"],
-          "잔잔한 힐링_야외": ["공원", "숲길", "수변공원"],
+          "액티비티_실내": ["방탈출", "보드게임카페", "볼링장", "원데이클래스", "실내양궁"],
+          "액티비티_야외": ["자전거대여", "테마파크", "유원지"],
+          "잔잔한 힐링_실내": ["소품샵", "독립서점", "미술관", "전시관", "공방", "편집샵"],
+          "잔잔한 힐링_야외": ["도시공원", "수목원", "호수공원"],
         };
 
         const key = `${activityPace}_${activityEnvironment}`;
-        const targetKeywords = activityKeywordMap[key] || ["명소"];
-        const pickedKeyword =
-          targetKeywords[Math.floor(Math.random() * targetKeywords.length)];
+        const targetKeywords = activityKeywordMap[key] || ["소품샵", "공방"];
+        const pickedKeyword = targetKeywords[Math.floor(Math.random() * targetKeywords.length)];
         const actQuery = `${location} ${pickedKeyword}`;
 
-        let rawResults = await searchKakaoPlaces(actQuery, {
+        let results = await searchKakaoPlaces(actQuery, {
           count: 15,
           ...chainAnchor,
         });
 
-        // 💡 효성인테리어 등 시공/도배/자재상 원천 차단 블랙리스트
-        const bannedWords = [
-          "인테리어",
-          "도배",
-          "장판",
-          "지업사",
-          "타일",
-          "샤시",
-          "철물",
-          "설비",
-          "건축",
-          "중개",
-          "부동산",
-          "수리",
+        const actBannedWords = [
+          "인테리어", "부동산", "철물", "설비", "샤시", "관리사무소", "주차장", "공업사"
         ];
+        
+        if (activityEnvironment === "실내") {
+          actBannedWords.push("도로", "길", "도보여행", "산책로", "산책", "공원", "숲길", "코스", "골목");
+        }
 
-        const validResults = rawResults.filter((p) => {
-          return !bannedWords.some(
-            (bad) => p.name.includes(bad) || p.subCategory?.includes(bad)
+        const validResults = results.filter((p) => {
+          const name = (p.name || "").toLowerCase();
+          const sub = (p.subCategory || "").toLowerCase();
+          const isBanned = actBannedWords.some(
+            (bad) => name.includes(bad) || sub.includes(bad)
           );
+          return !isBanned;
         });
 
         if (validResults.length === 0) {
-          const fallback = await searchKakaoPlaces(`${location} 명소`, {
+          const fallbackKeyword = activityEnvironment === "실내" ? "소품샵" : "공원";
+          const fallback = await searchKakaoPlaces(`${location} ${fallbackKeyword}`, {
             count: 8,
             ...chainAnchor,
           });
-          activityCandidates = shuffleArray(fallback).slice(0, 4);
+          activityCandidates = shuffleArray(fallback).slice(0, 5);
         } else {
-          activityCandidates = shuffleArray(validResults).slice(0, 4);
+          activityCandidates = shuffleArray(validResults).slice(0, 5);
         }
       }
     }
@@ -517,18 +518,21 @@ export async function POST(req: Request) {
 
 [사용자 선호 조건]
 - 식사 웨이팅 성향: ${diningWaiting}
-- 식사 선호: ${cuisine.join(", ") || "전체"} ${diningOption ? `(${diningOption})` : ""}
+- 식사 선호: ${cuisine.join(", ") || "전체"} (선호 메뉴: ${diningOption === "기타" ? "밥/면 외의 수제버거, 피자, 타코, 핑거푸드, 브런치 등" : diningOption})
 - 카페 선호: ${cafeType || "개인 카페"} (특징: ${searchCategoryKeyword})
 - 활동 선호: ${activityEnvironment} (${activityPace})
 
-[동선 및 선정 절대 규칙]
+[동선 및 선정 절대 규칙 - 위반 금지]
 1. 전체 코스는 반드시 정확히 ${upperCourseOrder.length}단계로만 구성해야 합니다.
 2. 사용자가 지정한 순서대로 각 카테고리에서 정확히 1곳씩 선택하세요:
 ${sequencePromptGuide}
-3. 각 단계 간의 도보 이동 거리가 최소화되도록 서로 가장 가까운 위치의 장소를 우선 선정하세요. (도보 10분 이내 권장)
-4. 후보군에 1곳만 존재하는 고정 장소(사용자가 직접 고른 장소)는 반드시 해당 단계에 누락 없이 포함하세요.
-5. placeId와 placeName은 아래 [제공된 실제 후보 장소 목록]의 문자열 그대로 입력하세요.
-6. 각 장소마다 순서와 시간대에 어울리는 다정한 한 줄 코멘터리를 작성하세요.
+3. [식사(DINING)]에는 절대로 제과점, 빵집, 디저트/카페 전문점을 선택하지 마세요. 든든한 식사(식당 요리)가 가능한 곳이어야 합니다.
+4. [실내 활동(ACTIVITY)] 선택 시에는 길거리, 산책로, 도로, 공원을 절대 선택할 수 없습니다. 소품샵, 전시관, 독립서점, 공방 등 '실내 건축물 내부 장소'만 선택하세요.
+5. 각 코스 항목은 반드시 서로 다른 장소여야 하며 동일한 장소를 중복 선택할 수 없습니다.
+6. 각 단계 간의 도보 이동 거리가 최소화되도록 서로 가장 가까운 위치의 장소를 우선 선정하세요.
+7. 후보군에 1곳만 존재하는 고정 장소(사용자가 직접 고른 장소)는 반드시 해당 단계에 누락 없이 포함하세요.
+8. placeId와 placeName은 아래 [제공된 실제 후보 장소 목록]의 문자열 그대로 입력하세요.
+9. 각 장소마다 순서와 시간대에 어울리는 다정한 한 줄 코멘터리를 작성하세요.
 
 [제공된 실제 후보 장소 목록]
 ${JSON.stringify(validCandidateInfo, null, 2)}
@@ -593,11 +597,11 @@ ${JSON.stringify(validCandidateInfo, null, 2)}
       }
     }
 
-    // [Fallback] AI 미응답 시 최근접 도보 거리 기반 알고리즘
     if (!aiResult || !aiResult.steps || aiResult.steps.length === 0) {
-      console.warn("AI 실패로 최근접 거리 Fallback 가동");
+      console.warn("AI 응답 실패 또는 Fallback 구동: 최근접 거리 & 중복 제거 알고리즘 가동");
       const defaultTimes = ["12:00", "14:00", "16:00", "18:00"];
       let lastPlace: Place | null = null;
+      const usedPlaceIds = new Set<string>();
 
       const fallbackSteps = upperCourseOrder.map((cat: string, idx: number) => {
         let candidatesPool: Place[] = [];
@@ -611,35 +615,35 @@ ${JSON.stringify(validCandidateInfo, null, 2)}
           defaultCommentary = "향긋한 커피와 맛있는 디저트를 즐기며 편안한 대화를 나눠보세요.";
         } else {
           candidatesPool = fixedActivity ? [fixedActivity] : activityCandidates;
-          defaultCommentary = "특별한 장소에서 함께 여유로운 시간을 만끽해보세요.";
+          defaultCommentary = "특별한 실내 공간에서 함께 여유로운 시간을 만끽해보세요.";
         }
 
-        let selected = candidatesPool[0] || allCandidates[0];
+        let availableCandidates = candidatesPool.filter(
+          (p) => !usedPlaceIds.has(String(p.id)) && (!lastPlace || p.name !== lastPlace.name)
+        );
+
+        if (availableCandidates.length === 0) {
+          availableCandidates = candidatesPool;
+        }
+
+        let selected = availableCandidates[0] || allCandidates[0];
+
         if (
           lastPlace &&
           lastPlace.lat &&
           lastPlace.lng &&
           lastPlace.lat > 0 &&
-          candidatesPool.length > 1
+          availableCandidates.length > 1
         ) {
-          const sorted = [...candidatesPool].sort((a, b) => {
-            const distA = calculateDistance(
-              lastPlace!.lat,
-              lastPlace!.lng,
-              a.lat,
-              a.lng
-            );
-            const distB = calculateDistance(
-              lastPlace!.lat,
-              lastPlace!.lng,
-              b.lat,
-              b.lng
-            );
+          const sorted = [...availableCandidates].sort((a, b) => {
+            const distA = calculateDistance(lastPlace!.lat, lastPlace!.lng, a.lat, a.lng);
+            const distB = calculateDistance(lastPlace!.lat, lastPlace!.lng, b.lat, b.lng);
             return distA - distB;
           });
           selected = sorted[0];
         }
 
+        usedPlaceIds.add(String(selected.id));
         lastPlace = selected;
 
         return {
@@ -721,9 +725,9 @@ ${JSON.stringify(validCandidateInfo, null, 2)}
       steps: finalSteps,
     });
   } catch (error: any) {
-    console.error("❌ [Course Generation Error]:", error);
+    console.error("Course Route 에러:", error);
     return NextResponse.json(
-      { error: error?.message || "서버 오류가 발생했습니다.", detail: String(error) },
+      { error: error?.message || "서버 오류가 발생했습니다." },
       { status: 500 }
     );
   }
