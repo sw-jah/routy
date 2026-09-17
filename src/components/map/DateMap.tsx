@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { getCurrentUser, checkUserExists } from '@/lib/authMock';
+import { getCurrentUser } from '@/lib/authMock';
+import type { Place } from '@/types/common';
 
 export interface HeartColor {
   id: string;
@@ -24,16 +25,6 @@ export interface GroupItem {
   colorId: string;
 }
 
-export interface Place {
-  id: string;
-  name: string;
-  lat: number;
-  lng: number;
-  isVisited: boolean;
-  address?: string;
-  group?: string;
-}
-
 export interface MapRoom {
   code: string;
   title: string;
@@ -48,9 +39,7 @@ const DEFAULT_GROUPS: GroupItem[] = [
   { name: '기본 그룹', colorId: 'pastel-yellow' },
 ];
 
-const ROOMS_STORAGE_KEY = 'routy_rooms_v2';
 const CURRENT_ROOM_KEY = 'routy_current_room_code';
-const generateCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
 
 interface DateMapProps {
   externalNewPlace?: Place | null;
@@ -81,7 +70,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
   const [newGroupColorId, setNewGroupColorId] = useState('pastel-pink');
   const [alertModalMessage, setAlertModalMessage] = useState<string | null>(null);
   const [groupToDelete, setGroupToDelete] = useState<string | null>(null);
-  const [showLeaveModal, setShowLeaveModal] = useState(false); // 방 나가기 모달
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
 
   // 친구 직접 초대 모달 상태
   const [showInviteUserModal, setShowInviteUserModal] = useState(false);
@@ -100,49 +89,50 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState('');
 
-  // 1. 유저 및 방 데이터 초기 로드
-  useEffect(() => {
-    const user = getCurrentUser() || 'guest';
-    setCurrentUser(user);
-
+  // 1. 방 목록 API 새로고침
+  const fetchMyRooms = useCallback(async (user: string, targetRoomCode?: string) => {
     try {
-      const saved = localStorage.getItem(ROOMS_STORAGE_KEY);
-      let allRooms: MapRoom[] = saved ? JSON.parse(saved) : [];
-      let hasMigration = false;
+      const res = await fetch(`/api/rooms?username=${encodeURIComponent(user)}`);
+      if (!res.ok) throw new Error('방 목록을 불러오지 못했습니다.');
 
-      allRooms = allRooms.map((r: any) => {
-        let updated = { ...r };
-        if (!updated.members) {
-          hasMigration = true;
-          updated.members = [user];
-        }
-        return updated;
-      });
-
-      if (hasMigration) {
-        localStorage.setItem(ROOMS_STORAGE_KEY, JSON.stringify(allRooms));
-      }
-
-      const myRooms = allRooms.filter((r) => r.members.includes(user));
+      const data = await res.json();
+      const myRooms: MapRoom[] = data.rooms || [];
       setRooms(myRooms);
 
       if (myRooms.length > 0) {
         const hash = window.location.hash.replace('#', '').toUpperCase();
         let target =
-          hash && myRooms.some((r) => r.code === hash)
-            ? hash
-            : localStorage.getItem(CURRENT_ROOM_KEY) || myRooms[0].code;
+          targetRoomCode ||
+          (hash && myRooms.some((r) => r.code === hash) ? hash : null) ||
+          localStorage.getItem(CURRENT_ROOM_KEY) ||
+          myRooms[0].code;
+
         if (!myRooms.some((r) => r.code === target)) target = myRooms[0].code;
 
         setActiveCode(target);
         window.location.hash = target;
         localStorage.setItem(CURRENT_ROOM_KEY, target);
+      } else {
+        setActiveCode('');
+        localStorage.removeItem(CURRENT_ROOM_KEY);
       }
-    } catch {
+    } catch (err: any) {
+      console.error(err);
       setStatus('error');
-      setErrorMessage('데이터를 불러오지 못했습니다.');
+      setErrorMessage(err?.message || '방 목록 로드 실패');
     }
   }, []);
+
+  // 2. 초기 로드
+  useEffect(() => {
+    const user = getCurrentUser() || '';
+    setCurrentUser(user);
+    if (user) {
+      fetchMyRooms(user);
+    } else {
+      setStatus('ready');
+    }
+  }, [fetchMyRooms]);
 
   // 외부 클릭 시 컬러 피커 닫기
   useEffect(() => {
@@ -160,44 +150,49 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
 
   const currentRoom: MapRoom | undefined = rooms.find((r) => r.code === activeCode);
 
-  const updateCurrentRoom = (updater: (room: MapRoom) => MapRoom) => {
-    if (!currentRoom) return;
-
-    const saved = localStorage.getItem(ROOMS_STORAGE_KEY);
-    let allRooms: MapRoom[] = saved ? JSON.parse(saved) : [];
-
-    const targetIdx = allRooms.findIndex((r) => r.code === currentRoom.code);
-    if (targetIdx !== -1) {
-      allRooms[targetIdx] = updater(allRooms[targetIdx]);
-      localStorage.setItem(ROOMS_STORAGE_KEY, JSON.stringify(allRooms));
-
-      const myRooms = allRooms.filter((r) => r.members.includes(currentUser));
-      setRooms(myRooms);
-    }
-  };
-
+  // 외부에서 전달된 신규 장소 DB 저장
   useEffect(() => {
     if (!externalNewPlace || !currentRoom) return;
-    updateCurrentRoom((room) => ({
-      ...room,
-      places: [externalNewPlace, ...room.places],
-      updatedAt: Date.now(),
-    }));
-  }, [externalNewPlace]);
+
+    const saveExternalPlace = async () => {
+      try {
+        await fetch('/api/places/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'addPlace',
+            roomCode: currentRoom.code,
+            place: externalNewPlace,
+          }),
+        });
+        fetchMyRooms(currentUser, currentRoom.code);
+      } catch (err) {
+        console.error('외부 장소 동기화 실패:', err);
+      }
+    };
+
+    saveExternalPlace();
+  }, [externalNewPlace, currentRoom, currentUser, fetchMyRooms]);
 
   const getHeartStyleForPlace = useCallback(
     (place: Place) => {
       if (!place.isVisited) {
         return { fill: '#FAF7F2', stroke: '#D5C2AD', strokeWidth: '2.5' };
       }
-      let colorId = 'pastel-pink';
-      if (!place.group || !currentRoom?.groups?.some((g) => g.name === place.group)) {
-        colorId = currentRoom?.defaultHeartColorId || 'pastel-pink';
-      } else {
-        const matchedGroup = currentRoom?.groups?.find((g) => g.name === place.group);
-        if (matchedGroup) colorId = matchedGroup.colorId;
-      }
+
+      // 기본 그룹도 실제 그룹처럼 색상을 적용한다.
+      const allGroups = [
+        ...DEFAULT_GROUPS,
+        ...(currentRoom?.groups || []).filter((g) => g.name !== '기본 그룹'),
+      ];
+
+      const matchedGroup = place.group
+        ? allGroups.find((g) => g.name === place.group)
+        : undefined;
+
+      const colorId = matchedGroup?.colorId || currentRoom?.defaultHeartColorId || 'pastel-pink';
       const colorConfig = HEART_PALETTE.find((c) => c.id === colorId) || HEART_PALETTE[0];
+
       return { fill: colorConfig.fill, stroke: colorConfig.stroke, strokeWidth: '2' };
     },
     [currentRoom]
@@ -220,7 +215,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     });
   }, []);
 
-  // 1순위 연동: URL 쿼리(q=메뉴명)가 바뀔 때 자동으로 검색창 동기화 및 카카오 지도 검색 실행
   useEffect(() => {
     if (initialQuery) {
       setSearchQuery(initialQuery);
@@ -296,7 +290,13 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
 
     const filteredPlaces = currentRoom.places.filter((p) => {
       if (selectedGroup === '전체') return true;
-      if (selectedGroup === '기본 찜') return !p.group || !currentRoom.groups.some((g) => g.name === p.group);
+      if (selectedGroup === '기본 찜') {
+        const allGroups = [
+          ...DEFAULT_GROUPS,
+          ...(currentRoom.groups || []).filter((g) => g.name !== '기본 그룹'),
+        ];
+        return !p.group || !allGroups.some((g) => g.name === p.group);
+      }
       return p.group === selectedGroup;
     });
 
@@ -323,18 +323,14 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         </span>
       `;
 
-      // 하트 자체를 클릭했을 때만 '다녀옴' 상태를 변경
       const heartEl = markerEl.querySelector('.marker-heart');
       heartEl?.addEventListener('click', (e) => {
         e.stopPropagation();
-
-        // 모아보기에서는 하트를 눌러도 다녀옴 상태를 변경하지 않음
         if (selectedGroup !== '전체') {
           toggleVisited(place.id);
         }
       });
 
-      // 하트 외의 마커 영역을 클릭하면 장소 선택만
       markerEl.addEventListener('click', (e) => {
         e.stopPropagation();
         setSelectedPlaceId((prev) => (prev === place.id ? null : place.id));
@@ -346,7 +342,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     });
   }, [currentRoom, selectedGroup, selectedPlaceId, status, mapReady, getHeartStyleForPlace]);
 
-  // 선택한 그룹/모아보기의 장소 범위에 맞춰 지도를 자동으로 맞춤
+  // 지도 영역 자동 맞춤
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !mapReady || status !== 'ready' || !currentRoom) return;
@@ -354,53 +350,75 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     const filteredPlaces = currentRoom.places.filter((p) => {
       if (selectedGroup === '전체') return true;
       if (selectedGroup === '기본 찜') {
-        return !p.group || !currentRoom.groups.some((g) => g.name === p.group);
+        const allGroups = [
+          ...DEFAULT_GROUPS,
+          ...(currentRoom.groups || []).filter((g) => g.name !== '기본 그룹'),
+        ];
+        return !p.group || !allGroups.some((g) => g.name === p.group);
       }
       return p.group === selectedGroup;
     });
 
-    // 장소가 없으면 기본 대한민국 중심 위치를 유지
     if (filteredPlaces.length === 0) {
       map.setLevel(13);
       map.panTo(new window.kakao.maps.LatLng(36.5, 127.8));
       return;
     }
 
-    // 장소가 하나라면 해당 장소를 중심으로 적당히 확대
     if (filteredPlaces.length === 1) {
       map.setLevel(5);
       map.panTo(new window.kakao.maps.LatLng(filteredPlaces[0].lat, filteredPlaces[0].lng));
       return;
     }
 
-    // 여러 장소가 있으면 해당 그룹의 모든 장소가 보이도록 자동 맞춤
     const bounds = new window.kakao.maps.LatLngBounds();
     filteredPlaces.forEach((place) => {
       bounds.extend(new window.kakao.maps.LatLng(place.lat, place.lng));
     });
     map.setBounds(bounds, 80, 80, 80, 80);
 
-    // 전국에 넓게 퍼진 경우 너무 축소되지 않도록 최대 축소 레벨을 제한
     if (map.getLevel() > 12) {
       map.setLevel(12);
     }
   }, [selectedGroup, mapReady, status, currentRoom]);
 
-  const toggleVisited = (id: string, targetIdx?: number) => {
-    updateCurrentRoom((room) => {
-      let count = 0;
-      return {
-        ...room,
-        places: room.places.map((p) => {
-          if (p.id === id) {
-            const isMatch = targetIdx !== undefined ? count === targetIdx : true;
-            count++;
-            if (isMatch) return { ...p, isVisited: !p.isVisited };
-          }
-          return p;
+  // 💡 하트 방문 여부 토글 (DB API 연동 및 낙관적 UI 업데이트)
+  const toggleVisited = async (placeId: string) => {
+    if (!currentRoom) return;
+    const targetPlace = currentRoom.places.find((p) => p.id === placeId);
+    if (!targetPlace) return;
+
+    const nextVisited = !targetPlace.isVisited;
+
+    // 1. UI 즉시 반영
+    setRooms((prevRooms) =>
+      prevRooms.map((r) =>
+        r.code === currentRoom.code
+          ? {
+              ...r,
+              places: r.places.map((p) => (p.id === placeId ? { ...p, isVisited: nextVisited } : p)),
+            }
+          : r
+      )
+    );
+
+    // 2. DB 동기화
+    try {
+      await fetch('/api/places/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'toggleVisited',
+          roomCode: currentRoom.code,
+          placeId,
+          isVisited: nextVisited,
         }),
-      };
-    });
+      });
+    } catch (err) {
+      console.error('방문 상태 저장 실패:', err);
+      // 실패 시 롤백
+      fetchMyRooms(currentUser, currentRoom.code);
+    }
   };
 
   const handleSelectOrUnselectPlace = (place: Place) => {
@@ -418,91 +436,225 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     mapInstanceRef.current.panTo(new window.kakao.maps.LatLng(place.lat, place.lng));
   };
 
-  const removePlaceItem = (placeId: string, targetIdx: number) => {
-    updateCurrentRoom((room) => {
-      let count = 0;
-      return {
-        ...room,
-        places: room.places.filter((p) => {
-          if (p.id === placeId) {
-            const isMatch = count === targetIdx;
-            count++;
-            return !isMatch;
-          }
-          return true;
-        }),
-      };
-    });
+  // 💡 찜 장소 삭제 (DB 연동)
+  const removePlaceItem = async (placeId: string) => {
+    if (!currentRoom) return;
+
+    // 1. UI 즉시 반영
+    setRooms((prevRooms) =>
+      prevRooms.map((r) =>
+        r.code === currentRoom.code
+          ? { ...r, places: r.places.filter((p) => p.id !== placeId) }
+          : r
+      )
+    );
     if (selectedPlaceId === placeId) setSelectedPlaceId(null);
-  };
 
-  const handleUpdateActiveColor = (newColorId: string) => {
-    if (selectedGroup === '기본 찜') {
-      updateCurrentRoom((room) => ({ ...room, defaultHeartColorId: newColorId, updatedAt: Date.now() }));
-    } else {
-      updateCurrentRoom((room) => ({
-        ...room,
-        groups: room.groups.map((g) => (g.name === selectedGroup ? { ...g, colorId: newColorId } : g)),
-        updatedAt: Date.now(),
-      }));
+    // 2. DB 연동
+    try {
+      await fetch('/api/places/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'removePlace',
+          roomCode: currentRoom.code,
+          placeId,
+        }),
+      });
+    } catch (err) {
+      console.error('장소 삭제 실패:', err);
+      fetchMyRooms(currentUser, currentRoom.code);
     }
-    setActiveColorPicker(false);
   };
 
-  const handleAddGroup = (e: React.FormEvent) => {
+  // 그룹 하트 색상 변경
+  const handleUpdateActiveColor = async (newColorId: string) => {
+    if (!currentRoom || selectedGroup === '전체') return;
+
+    // 기본 그룹은 기본값으로 고정해 두고, 사용자가 색상을 바꾸는 대상은
+    // 기본 찜 / 커스텀 그룹으로 한정한다.
+    if (selectedGroup === '기본 그룹') {
+      setActiveColorPicker(false);
+      return;
+    }
+
+    // UI 즉시 반영
+    setRooms((prevRooms) =>
+      prevRooms.map((r) => {
+        if (r.code !== currentRoom.code) return r;
+        if (selectedGroup === '기본 찜') {
+          return { ...r, defaultHeartColorId: newColorId };
+        }
+        return {
+          ...r,
+          groups: (r.groups || []).map((g) =>
+            g.name === selectedGroup ? { ...g, colorId: newColorId } : g
+          ),
+        };
+      })
+    );
+
+    // DB 동기화
+    try {
+      const res = await fetch('/api/places/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'updateGroupColor',
+          roomCode: currentRoom.code,
+          groupName: selectedGroup,
+          colorId: newColorId,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error('하트 색상 저장에 실패했습니다.');
+      }
+    } catch (err) {
+      console.error('그룹 하트 색상 저장 실패:', err);
+      await fetchMyRooms(currentUser, currentRoom.code);
+      setAlertModalMessage('하트 색상 저장에 실패했습니다.');
+    } finally {
+      setActiveColorPicker(false);
+    }
+  };
+
+  // 💡 새 찜 그룹 추가 (DB 연동)
+  const handleAddGroup = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = newGroupName.trim();
-    if (!trimmed) return;
-    if (currentRoom?.groups?.some((g) => g.name === trimmed)) {
+    if (!trimmed || !currentRoom) return;
+
+    if (trimmed === '기본 찜' || trimmed === '기본 그룹' || currentRoom.groups?.some((g) => g.name === trimmed)) {
       setAlertModalMessage('이미 존재하는 그룹 이름입니다.');
       return;
     }
-    const nextGroups = [...(currentRoom?.groups || []), { name: trimmed, colorId: newGroupColorId }];
-    updateCurrentRoom((room) => ({ ...room, groups: nextGroups, updatedAt: Date.now() }));
-    setSelectedGroup(trimmed);
-    setNewGroupName('');
-    setShowAddGroupModal(false);
+
+    try {
+      const res = await fetch('/api/places/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'addGroup',
+          roomCode: currentRoom.code,
+          groupName: trimmed,
+          colorId: newGroupColorId,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        setAlertModalMessage(data.error || '그룹 생성에 실패했습니다.');
+        return;
+      }
+
+      await fetchMyRooms(currentUser, currentRoom.code);
+      setSelectedGroup(trimmed);
+      setNewGroupName('');
+      setShowAddGroupModal(false);
+    } catch (err) {
+      console.error(err);
+      setAlertModalMessage('그룹 추가 중 오류가 발생했습니다.');
+    }
   };
 
-  const confirmDeleteGroup = () => {
-    if (!groupToDelete) return;
-    const nextGroups = (currentRoom?.groups || []).filter((g) => g.name !== groupToDelete);
-    updateCurrentRoom((room) => ({
-      ...room,
-      groups: nextGroups,
-      places: room.places.filter((p) => p.group !== groupToDelete),
-    }));
-    if (selectedGroup === groupToDelete) setSelectedGroup('전체');
-    setGroupToDelete(null);
+  // 💡 찜 그룹 삭제 (DB 연동)
+  const confirmDeleteGroup = async () => {
+    if (!groupToDelete || !currentRoom) return;
+
+    if (groupToDelete === '기본 그룹') {
+      setAlertModalMessage('기본 그룹은 삭제할 수 없습니다.');
+      setGroupToDelete(null);
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/places/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'deleteGroup',
+          roomCode: currentRoom.code,
+          groupName: groupToDelete,
+        }),
+      });
+
+      if (!res.ok) {
+        let message = '그룹 삭제에 실패했습니다.';
+        try {
+          const data = await res.json();
+          message = data.error || message;
+        } catch {
+          // JSON이 아닌 응답이어도 아래의 사용자 메시지는 유지한다.
+        }
+        throw new Error(message);
+      }
+
+      if (selectedGroup === groupToDelete) setSelectedGroup('기본 찜');
+      setGroupToDelete(null);
+      await fetchMyRooms(currentUser, currentRoom.code);
+    } catch (err: any) {
+      console.error('그룹 삭제 실패:', err);
+      setAlertModalMessage(err?.message || '그룹 삭제에 실패했습니다.');
+    }
   };
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-
-    // 모아보기에서는 장소 검색을 사용할 수 없음
     if (selectedGroup === '전체') {
       setSearchResults([]);
       return;
     }
-
     executeSearch(searchQuery);
   };
 
-  const addPlaceFromSearch = (item: any) => {
+  // 💡 장소 검색 결과에서 찜하기 (DB 연동)
+  const addPlaceFromSearch = async (item: any) => {
+    if (!currentRoom) return;
+
     const assignedGroup = selectedGroup === '전체' || selectedGroup === '기본 찜' ? undefined : selectedGroup;
     const newPlace: Place = {
       id: String(item.id || Date.now()),
       name: item.place_name,
+      category:
+        item.category_group_code === 'FD6'
+          ? 'RESTAURANT'
+          : item.category_group_code === 'CE7'
+          ? 'CAFE'
+          : 'ACTIVITY',
       lat: parseFloat(item.y),
       lng: parseFloat(item.x),
       isVisited: false,
       address: item.road_address_name || item.address_name,
       group: assignedGroup,
+      placeUrl: item.place_url,
     };
-    updateCurrentRoom((room) => ({ ...room, places: [newPlace, ...room.places] }));
+
+    // UI 즉시 반영
+    setRooms((prevRooms) =>
+      prevRooms.map((r) =>
+        r.code === currentRoom.code ? { ...r, places: [newPlace, ...r.places] } : r
+      )
+    );
     setSearchResults([]);
     setSearchQuery('');
     focusPlace(newPlace);
+
+    // DB 연동
+    try {
+      await fetch('/api/places/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'addPlace',
+          roomCode: currentRoom.code,
+          place: newPlace,
+        }),
+      });
+    } catch (err) {
+      console.error('장소 찜 추가 실패:', err);
+      fetchMyRooms(currentUser, currentRoom.code);
+    }
   };
 
   const switchRoom = (code: string) => {
@@ -515,35 +667,38 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     setShowMembersList(false);
   };
 
-  const handleCreateRoom = (e: React.FormEvent) => {
+  // 💡 새 방 만들기 (DB 연동)
+  const handleCreateRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRoomTitle.trim()) return;
-    const code = generateCode();
 
-    const newRoom: MapRoom = {
-      code,
-      title: newRoomTitle.trim(),
-      places: [],
-      groups: [...DEFAULT_GROUPS],
-      defaultHeartColorId: 'pastel-pink',
-      updatedAt: Date.now(),
-      members: [currentUser],
-    };
+    try {
+      const res = await fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: newRoomTitle.trim(),
+          username: currentUser,
+        }),
+      });
 
-    const saved = localStorage.getItem(ROOMS_STORAGE_KEY);
-    let allRooms: MapRoom[] = saved ? JSON.parse(saved) : [];
-    allRooms.unshift(newRoom);
+      const data = await res.json();
+      if (!res.ok) {
+        setAlertModalMessage(data.error || '방 생성에 실패했습니다.');
+        return;
+      }
 
-    localStorage.setItem(ROOMS_STORAGE_KEY, JSON.stringify(allRooms));
-    const myRooms = allRooms.filter((r) => r.members.includes(currentUser));
-
-    setRooms(myRooms);
-    switchRoom(code);
-    setNewRoomTitle('');
-    setShowRoomModal(false);
+      await fetchMyRooms(currentUser, data.code);
+      setNewRoomTitle('');
+      setShowRoomModal(false);
+    } catch (err) {
+      console.error(err);
+      setAlertModalMessage('방 생성 중 오류가 발생했습니다.');
+    }
   };
 
-  const handleJoinRoom = (e: React.FormEvent) => {
+  // 💡 코드로 방 참여 (DB 연동)
+  const handleJoinRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     const clean = joinRoomCode.trim().toUpperCase();
     if (clean.length !== 6) {
@@ -551,143 +706,119 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
       return;
     }
 
-    const saved = localStorage.getItem(ROOMS_STORAGE_KEY);
-    let allRooms: MapRoom[] = saved ? JSON.parse(saved) : [];
-    const targetIdx = allRooms.findIndex((r) => r.code === clean);
+    try {
+      const res = await fetch('/api/rooms/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'join',
+          code: clean,
+          username: currentUser,
+        }),
+      });
 
-    if (targetIdx === -1) {
-      setAlertModalMessage('존재하지 않는 초대 코드입니다.');
-      return;
+      const data = await res.json();
+      if (!res.ok) {
+        setAlertModalMessage(data.error || '방 참여에 실패했습니다.');
+        return;
+      }
+
+      await fetchMyRooms(currentUser, clean);
+      setJoinRoomCode('');
+      setNewRoomTitle('');
+      setShowRoomModal(false);
+    } catch (err) {
+      console.error(err);
+      setAlertModalMessage('방 참여 중 오류가 발생했습니다.');
     }
-
-    const targetRoom = allRooms[targetIdx];
-    if (!targetRoom.members) targetRoom.members = [];
-
-    if (targetRoom.members.includes(currentUser)) {
-      setAlertModalMessage('이미 참여중인 방입니다.');
-    } else if (targetRoom.members.length >= 4) {
-      setAlertModalMessage('방 인원이 가득 찼습니다. (최대 4명)');
-      return;
-    } else {
-      targetRoom.members.push(currentUser);
-      allRooms[targetIdx] = targetRoom;
-      localStorage.setItem(ROOMS_STORAGE_KEY, JSON.stringify(allRooms));
-
-      const myRooms = allRooms.filter((r) => r.members.includes(currentUser));
-      setRooms(myRooms);
-    }
-
-    switchRoom(clean);
-    setJoinRoomCode('');
-    setNewRoomTitle('');
-    setShowRoomModal(false);
   };
 
-  const handleInviteUser = (e: React.FormEvent) => {
+  // 💡 친구 아이디로 초대 (DB 연동)
+  const handleInviteUser = async (e: React.FormEvent) => {
     e.preventDefault();
     const targetUser = inviteUsernameInput.trim();
-    if (!targetUser) return;
+    if (!targetUser || !currentRoom) return;
 
-    if (!currentRoom) return;
+    try {
+      const res = await fetch('/api/rooms/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'invite',
+          code: currentRoom.code,
+          targetUsername: targetUser,
+        }),
+      });
 
-    if (currentRoom.members.length >= 4) {
-      setAlertModalMessage('방 인원이 가득 찼습니다. (최대 4명)');
-      return;
-    }
-
-    if (currentRoom.members.includes(targetUser)) {
-      setAlertModalMessage('이미 방에 참여 중인 유저입니다.');
-      return;
-    }
-
-    if (!checkUserExists(targetUser)) {
-      setAlertModalMessage(`'${targetUser}' 아이디를 가진 사용자를 찾을 수 없습니다.`);
-      return;
-    }
-
-    updateCurrentRoom((room) => ({
-      ...room,
-      members: [...room.members, targetUser],
-      updatedAt: Date.now(),
-    }));
-
-    setInviteUsernameInput('');
-    setShowInviteUserModal(false);
-    setAlertModalMessage(`🎉 '${targetUser}'님을 방에 초대했습니다!`);
-  };
-
-  // 🌟 방 나가기 핸들러 (내 아이디 제외 후 남은 방 전환)
-  const handleConfirmLeaveRoom = () => {
-    if (!currentRoom) return;
-
-    const saved = localStorage.getItem(ROOMS_STORAGE_KEY);
-    let allRooms: MapRoom[] = saved ? JSON.parse(saved) : [];
-
-    const targetIdx = allRooms.findIndex((r) => r.code === currentRoom.code);
-    if (targetIdx !== -1) {
-      const remainingMembers = allRooms[targetIdx].members.filter((m) => m !== currentUser);
-
-      if (remainingMembers.length === 0) {
-        // 남은 멤버가 없으면 방 자체 삭제
-        allRooms.splice(targetIdx, 1);
-      } else {
-        allRooms[targetIdx].members = remainingMembers;
+      const data = await res.json();
+      if (!res.ok) {
+        setAlertModalMessage(data.error || '초대에 실패했습니다.');
+        return;
       }
 
-      localStorage.setItem(ROOMS_STORAGE_KEY, JSON.stringify(allRooms));
+      await fetchMyRooms(currentUser, currentRoom.code);
+      setInviteUsernameInput('');
+      setShowInviteUserModal(false);
+      setAlertModalMessage(`🎉 '${targetUser}'님을 방에 초대했습니다!`);
+    } catch (err) {
+      console.error(err);
+      setAlertModalMessage('초대 중 오류가 발생했습니다.');
+    }
+  };
 
-      const myRooms = allRooms.filter((r) => r.members.includes(currentUser));
-      setRooms(myRooms);
+  // 💡 방 나가기 (DB 연동)
+  const handleConfirmLeaveRoom = async () => {
+    if (!currentRoom) return;
+
+    try {
+      const res = await fetch('/api/rooms/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'leave',
+          code: currentRoom.code,
+          username: currentUser,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        setAlertModalMessage(data.error || '방 나가기에 실패했습니다.');
+        return;
+      }
 
       setShowLeaveModal(false);
-
-      if (myRooms.length > 0) {
-        switchRoom(myRooms[0].code);
-      } else {
-        setActiveCode('');
-        localStorage.removeItem(CURRENT_ROOM_KEY);
-      }
+      await fetchMyRooms(currentUser);
+    } catch (err) {
+      console.error(err);
+      setAlertModalMessage('방 나가기 처리 중 오류가 발생했습니다.');
     }
   };
 
+  // 모달 렌더링 (z-[90] 상위 레이어)
   const renderModals = () => (
     <>
-      {alertModalMessage && (
-        <div className="fixed inset-0 z-[60] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 text-center">
-            <span className="text-3xl mt-1">💡</span>
-            <div>
-              <p className="font-title text-sm text-[#2D241E] leading-relaxed">{alertModalMessage}</p>
-            </div>
-            <button
-              onClick={() => setAlertModalMessage(null)}
-              className="font-title w-full py-2.5 bg-[#2D241E] hover:bg-[#43362E] text-white text-xs rounded-xl transition active:scale-95 shadow-xs"
-            >
-              확인
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 🌟 방 나가기 확인 모달 */}
+      {/* 1. 방 나가기 확인 모달 */}
       {showLeaveModal && (
         <div className="fixed inset-0 z-[60] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 text-center">
+          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 text-center animate-in zoom-in-95 duration-150">
             <span className="text-3xl mt-1">🚪</span>
             <div>
               <h3 className="font-title text-base text-[#2D241E]">'{currentRoom?.title}' 방 나가기</h3>
-              <p className="font-body text-xs text-[#8C7A6B] mt-1.5 leading-relaxed">
+              <p className="font-body text-xs text-[#8C7A6B] mt-1.5 leading-relaxed break-keep">
                 현재 약속 방에서 나가시겠습니까?<br />언제든 초대 코드로 다시 참여할 수 있습니다.
               </p>
             </div>
             <div className="flex gap-2 mt-1">
               <button
+                type="button"
                 onClick={() => setShowLeaveModal(false)}
                 className="font-title flex-1 py-2.5 bg-white border-2 border-[#EADFCF] hover:bg-[#FAF7F2] text-[#7A6251] text-xs rounded-xl transition active:scale-95"
               >
                 취소
               </button>
               <button
+                type="button"
                 onClick={handleConfirmLeaveRoom}
                 className="font-title flex-1 py-2.5 bg-[#C25E3E] hover:bg-[#B04E30] text-white text-xs rounded-xl transition active:scale-95 shadow-xs"
               >
@@ -698,12 +829,14 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         </div>
       )}
 
+      {/* 2. 친구 초대 모달 */}
       {showInviteUserModal && (
         <div className="fixed inset-0 z-[60] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4">
+          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-1 border-b border-[#EADFCF]">
               <h3 className="font-title text-base">친구 초대하기</h3>
               <button
+                type="button"
                 onClick={() => setShowInviteUserModal(false)}
                 className="font-title text-[#A89889] hover:text-[#2D241E] text-sm"
               >
@@ -723,7 +856,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                   className="font-body w-full mt-1.5 px-3.5 py-2.5 text-xs bg-white border-2 border-[#EADFCF] rounded-xl focus:outline-none focus:border-[#C25E3E]"
                 />
               </div>
-              <p className="font-body text-[11px] text-[#8C7A6B]">
+              <p className="font-body text-[11px] text-[#8C7A6B] leading-relaxed">
                 상대방의 아이디를 입력하면 해당 유저의 지도 목록에 이 방이 즉시 추가됩니다!
               </p>
               <button
@@ -737,12 +870,14 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         </div>
       )}
 
+      {/* 3. 약속 방 관리 모달 */}
       {showRoomModal && (
         <div className="fixed inset-0 z-[60] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-sm rounded-[30px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4">
+          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-sm rounded-[30px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-2 border-b border-[#EADFCF]">
               <h3 className="font-title text-base">약속 방 관리</h3>
               <button
+                type="button"
                 onClick={() => setShowRoomModal(false)}
                 className="font-title text-[#A89889] hover:text-[#2D241E] text-sm"
               >
@@ -751,6 +886,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
             </div>
             <div className="font-title flex rounded-xl bg-[#EFE9DF] p-1 text-xs">
               <button
+                type="button"
                 onClick={() => setModalMode('create')}
                 className={`flex-1 py-1.5 rounded-lg transition ${
                   modalMode === 'create' ? 'bg-[#2D241E] text-[#F3D5B5] shadow-xs' : 'text-[#7A6251]'
@@ -759,6 +895,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 새 방 만들기
               </button>
               <button
+                type="button"
                 onClick={() => setModalMode('join')}
                 className={`flex-1 py-1.5 rounded-lg transition ${
                   modalMode === 'join' ? 'bg-[#2D241E] text-[#F3D5B5] shadow-xs' : 'text-[#7A6251]'
@@ -782,7 +919,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 </div>
                 <button
                   type="submit"
-                  className="font-title w-full py-3 bg-[#2D241E] hover:bg-[#43362E] text-white text-xs rounded-xl transition mt-1"
+                  className="font-title w-full py-3 bg-[#2D241E] hover:bg-[#43362E] text-white text-xs rounded-xl transition mt-1 active:scale-95 shadow-xs"
                 >
                   방 생성하기
                 </button>
@@ -803,12 +940,31 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 </div>
                 <button
                   type="submit"
-                  className="font-title w-full py-3 bg-[#2D241E] hover:bg-[#43362E] text-white text-xs rounded-xl transition mt-1"
+                  className="font-title w-full py-3 bg-[#2D241E] hover:bg-[#43362E] text-white text-xs rounded-xl transition mt-1 active:scale-95 shadow-xs"
                 >
                   방 들어가기
                 </button>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* 4. 💡 커스텀 알림 모달 (z-[90] 상위 레이어로 전면 노출) */}
+      {alertModalMessage && (
+        <div className="fixed inset-0 z-[90] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 text-center animate-in zoom-in-95 duration-150">
+            <span className="text-3xl mt-1">💡</span>
+            <div>
+              <p className="font-title text-sm text-[#2D241E] leading-relaxed break-keep">{alertModalMessage}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAlertModalMessage(null)}
+              className="font-title w-full py-2.5 bg-[#2D241E] hover:bg-[#43362E] text-white text-xs rounded-xl transition active:scale-95 shadow-xs"
+            >
+              확인
+            </button>
           </div>
         </div>
       )}
@@ -830,6 +986,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         </div>
         <div className="flex gap-3 mt-2 w-full max-w-[280px]">
           <button
+            type="button"
             onClick={() => {
               setModalMode('create');
               setShowRoomModal(true);
@@ -839,6 +996,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
             + 방 만들기
           </button>
           <button
+            type="button"
             onClick={() => {
               setModalMode('join');
               setShowRoomModal(true);
@@ -853,16 +1011,25 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     );
   }
 
-  const roomGroups = currentRoom?.groups || DEFAULT_GROUPS;
-  const filterPlaces = (p: Place) => {
-    if (selectedGroup === '전체') return true;
-    if (selectedGroup === '기본 찜') return !p.group || !roomGroups.some((g) => g.name === p.group);
-    return p.group === selectedGroup;
-  };
+const roomGroups: GroupItem[] = [
+  ...DEFAULT_GROUPS,
+  ...(currentRoom?.groups || []).filter((g) => g.name !== '기본 그룹'),
+];
+
+const filterPlaces = (p: Place) => {
+  if (selectedGroup === '전체') return true;
+
+  if (selectedGroup === '기본 찜') {
+    return !p.group || p.group === '기본 찜';
+  }
+
+  return (p.group || '').trim() === selectedGroup.trim();
+};
 
   let activeColorId = 'pastel-pink';
-  if (selectedGroup === '기본 찜') activeColorId = currentRoom?.defaultHeartColorId || 'pastel-pink';
-  else if (selectedGroup !== '전체') {
+  if (selectedGroup === '기본 찜') {
+    activeColorId = currentRoom?.defaultHeartColorId || 'pastel-pink';
+  } else if (selectedGroup !== '전체') {
     const matched = roomGroups.find((g) => g.name === selectedGroup);
     if (matched) activeColorId = matched.colorId;
   }
@@ -893,6 +1060,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
           </div>
 
           <button
+            type="button"
             onClick={() => setShowRoomModal(true)}
             className="font-title text-xs px-3 py-2 bg-[#524237] hover:bg-[#614F43] text-[#F3D5B5] rounded-xl border border-[#695547] transition active:scale-95 shrink-0"
           >
@@ -904,6 +1072,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         <div className="flex items-center justify-between pt-2 border-t border-[#4D3E34] text-xs">
           <div className="flex items-center gap-3">
             <button
+              type="button"
               onClick={() => setShowInviteCode(!showInviteCode)}
               className="font-title text-xs text-[#C8B8A6] hover:text-[#F3D5B5] flex items-center gap-1 transition"
             >
@@ -911,12 +1080,11 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
               <span>{showInviteCode ? '초대 코드 닫기' : '초대 코드'}</span>
             </button>
 
-            {/* 초대 코드가 열려 있으면 참여 멤버/방 나가기는 숨김 */}
             {!showInviteCode && (
               <>
                 <span className="text-[#59483D]">|</span>
-
                 <button
+                  type="button"
                   onClick={() => setShowMembersList(!showMembersList)}
                   className="font-title text-xs text-[#C8B8A6] hover:text-[#F3D5B5] flex items-center gap-1 transition"
                 >
@@ -926,9 +1094,8 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 </button>
 
                 <span className="text-[#59483D]">|</span>
-
-                {/* 🌟 방 나가기 액션 버튼 */}
                 <button
+                  type="button"
                   onClick={() => setShowLeaveModal(true)}
                   className="font-title text-xs text-[#C8B8A6] hover:text-[#E07A5F] flex items-center gap-1 transition"
                   title="이 방에서 나가기"
@@ -946,6 +1113,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 {activeCode}
               </span>
               <button
+                type="button"
                 onClick={() => {
                   navigator.clipboard.writeText(`${activeCode}`);
                   setCopyFeedback(true);
@@ -959,7 +1127,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
           )}
         </div>
 
-        {/* 참여 멤버 클릭 시 토글되는 드롭다운 영역 */}
         {showMembersList && (
           <div className="pt-2 border-t border-[#4D3E34] flex items-center gap-1.5 flex-wrap animate-in fade-in zoom-in-[0.98] duration-150">
             {currentMembers.map((member, idx) => {
@@ -1001,6 +1168,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
           {selectedGroup !== '전체' && (
             <div ref={colorPickerContainerRef} className="relative">
               <button
+                type="button"
                 onClick={() => setActiveColorPicker(!activeColorPicker)}
                 className="px-2.5 py-1 bg-white hover:bg-[#FAF7F2] border border-[#EADFCF] rounded-xl shadow-2xs transition flex items-center gap-1.5 active:scale-95"
               >
@@ -1015,20 +1183,32 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 <div className="absolute right-0 top-8 z-50 p-3 bg-white text-[#2D241E] rounded-2xl border-2 border-[#EADFCF] shadow-xl flex flex-col gap-2 w-44 animate-in fade-in zoom-in-95 duration-150">
                   <div className="flex justify-between items-center pb-1 border-b border-[#F2EAE0]">
                     <span className="font-title text-[10px] text-[#7A6251]">
-                      {selectedGroup === '기본 찜' ? '기본 찜 하트색' : `'${selectedGroup}' 하트색`}
+                      {selectedGroup === '기본 찜'
+                        ? '기본 찜 하트색'
+                        : selectedGroup === '기본 그룹'
+                        ? '기본 그룹 하트색'
+                        : `'${selectedGroup}' 하트색`}
                     </span>
-                    <button onClick={() => setActiveColorPicker(false)} className="text-[10px] text-[#A89889] hover:text-[#2D241E]">
+                    <button
+                      type="button"
+                      onClick={() => setActiveColorPicker(false)}
+                      className="text-[10px] text-[#A89889] hover:text-[#2D241E]"
+                    >
                       ✕
                     </button>
                   </div>
                   <div className="flex flex-col gap-1 pt-0.5">
                     {HEART_PALETTE.map((palette) => (
                       <button
+                        type="button"
                         key={palette.id}
                         onClick={() => handleUpdateActiveColor(palette.id)}
+                        disabled={selectedGroup === '기본 그룹'}
                         className={`px-2.5 py-1.5 rounded-xl text-left text-xs transition flex items-center justify-between ${
                           activeColorId === palette.id
                             ? 'bg-[#FAF7F2] font-bold text-[#2D241E] border border-[#EADFCF]'
+                            : selectedGroup === '기본 그룹'
+                            ? 'text-[#C8B8A6] cursor-not-allowed'
                             : 'hover:bg-[#F9ECE7] text-[#7A6251]'
                         }`}
                       >
@@ -1077,7 +1257,11 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
           <div className="p-3 bg-white rounded-[24px] border-2 border-[#EADFCF] shadow-xl flex flex-col gap-2 z-20">
             <div className="flex justify-between items-center px-1">
               <span className="font-title text-xs text-[#7A6251]">검색 결과 (장소 추가)</span>
-              <button onClick={() => setSearchResults([])} className="font-title text-xs text-[#A89889] hover:text-[#2D241E]">
+              <button
+                type="button"
+                onClick={() => setSearchResults([])}
+                className="font-title text-xs text-[#A89889] hover:text-[#2D241E]"
+              >
                 닫기 ✕
               </button>
             </div>
@@ -1091,6 +1275,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                   <p className="font-body text-[11px] text-[#8C7A6B] truncate">{res.road_address_name || res.address_name}</p>
                 </div>
                 <button
+                  type="button"
                   onClick={() => addPlaceFromSearch(res)}
                   className="font-title px-3 py-1.5 text-xs bg-[#2D241E] text-white rounded-xl hover:bg-[#43362E] transition active:scale-95 shrink-0"
                 >
@@ -1104,6 +1289,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         {/* 3. 찜 그룹 탭 바 */}
         <div className="flex gap-2 items-center overflow-x-auto pb-1 no-scrollbar pt-1">
           <button
+            type="button"
             onClick={() => {
               setSelectedGroup('전체');
               setSearchResults([]);
@@ -1119,17 +1305,20 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
             모아보기
           </button>
           <button
+            type="button"
             onClick={() => setSelectedGroup('기본 찜')}
             className={`font-title px-3.5 py-1.5 rounded-xl text-xs transition whitespace-nowrap active:scale-95 ${
               selectedGroup === '기본 찜'
-                ? 'bg-[#2D241E] text-[#F3D5B5] shadow-xs'
-                : 'bg-white text-[#7A6251] border-2 border-[#EADFCF] hover:bg-[#FAF7F2]'
+                ? 'bg-[#2D241E] text-[#F3D5B5] border-[#2D241E]'
+                : 'bg-white text-[#7A6251] border-[#EADFCF] hover:bg-[#FAF7F2]'
             }`}
           >
             🤍 기본 찜
           </button>
           {roomGroups.map((grp) => {
             const isActive = selectedGroup === grp.name;
+            const isDefaultGroup = grp.name === '기본 그룹';
+
             return (
               <div
                 key={grp.name}
@@ -1138,6 +1327,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 }`}
               >
                 <button
+                  type="button"
                   onClick={() => setSelectedGroup(grp.name)}
                   className={`font-title px-3.5 py-1.5 text-xs transition whitespace-nowrap active:scale-95 ${
                     isActive ? 'text-[#F3D5B5]' : 'text-[#7A6251]'
@@ -1145,21 +1335,26 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 >
                   📁 {grp.name}
                 </button>
-                <button
-                  onClick={() => setGroupToDelete(grp.name)}
-                  title="그룹 삭제"
-                  className={`font-title px-2.5 py-1.5 text-[10px] transition border-l ${
-                    isActive
-                      ? 'bg-[#43362E] text-[#C8B8A6] border-[#59483D] hover:text-white'
-                      : 'bg-[#FAF7F2] text-[#A89889] border-[#EADFCF] hover:text-[#C25E3E]'
-                  }`}
-                >
-                  ✕
-                </button>
+
+                {!isDefaultGroup && (
+                  <button
+                    type="button"
+                    onClick={() => setGroupToDelete(grp.name)}
+                    title="그룹 삭제"
+                    className={`font-title px-2.5 py-1.5 text-[10px] transition border-l ${
+                      isActive
+                        ? 'bg-[#43362E] text-[#C8B8A6] border-[#59483D] hover:text-white'
+                        : 'bg-[#FAF7F2] text-[#A89889] border-[#EADFCF] hover:text-[#C25E3E]'
+                    }`}
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
             );
           })}
           <button
+            type="button"
             onClick={() => setShowAddGroupModal(true)}
             className="font-title px-3 py-1.5 rounded-xl text-xs bg-[#FAF7F2] text-[#A89889] border border-dashed border-[#D5C2AD] hover:bg-[#F3ECE0] transition whitespace-nowrap shrink-0 active:scale-95"
           >
@@ -1214,119 +1409,118 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
               해당 그룹에 등록된 장소가 없습니다.
             </div>
           ) : (
-            (() => {
-              const renderCounts: Record<string, number> = {};
-              return currentRoom?.places.filter(filterPlaces).map((place) => {
-                const currentIdx = renderCounts[place.id] || 0;
-                renderCounts[place.id] = currentIdx + 1;
-                const isSelected = selectedPlaceId === place.id;
-                const style = getHeartStyleForPlace(place);
+            currentRoom?.places.filter(filterPlaces).map((place) => {
+              const isSelected = selectedPlaceId === place.id;
+              const style = getHeartStyleForPlace(place);
 
-                return (
-                  <div
-                    key={`place-${place.id}-${currentIdx}`}
-                    onClick={() => handleSelectOrUnselectPlace(place)}
-                    className={`p-3.5 rounded-2xl border-2 transition-all flex items-center justify-between cursor-pointer ${
-                      isSelected
-                        ? 'bg-[#2D241E] text-white border-[#2D241E] shadow-md scale-[1.01]'
-                        : 'bg-white text-[#2D241E] border-[#EADFCF] hover:border-[#D5C2AD]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 overflow-hidden">
-                      <div className="overflow-hidden pl-1">
-                        <div className="flex items-center gap-2">
-                          <p className="font-title text-sm tracking-tight truncate">{place.name}</p>
-                          {place.group && (
-                            <span
-                              className={`font-title text-[10px] px-2 py-0.5 rounded-lg border ${
-                                isSelected
-                                  ? 'bg-[#43362E] text-[#F3D5B5] border-[#59483D]'
-                                  : 'bg-[#FAF7F2] text-[#7A6251] border-[#EADFCF]'
-                              }`}
-                            >
-                              {place.group}
-                            </span>
-                          )}
-                        </div>
-                        {place.address && (
-                          <p
-                            className={`font-body text-xs mt-0.5 truncate max-w-[210px] ${
-                              isSelected ? 'text-[#C8B8A6]' : 'text-[#8C7A6B]'
+              return (
+                <div
+                  key={`place-${place.id}`}
+                  onClick={() => handleSelectOrUnselectPlace(place)}
+                  className={`p-3.5 rounded-2xl border-2 transition-all flex items-center justify-between cursor-pointer ${
+                    isSelected
+                      ? 'bg-[#2D241E] text-white border-[#2D241E] shadow-md scale-[1.01]'
+                      : 'bg-white text-[#2D241E] border-[#EADFCF] hover:border-[#D5C2AD]'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 overflow-hidden">
+                    <div className="overflow-hidden pl-1">
+                      <div className="flex items-center gap-2">
+                        <p className="font-title text-sm tracking-tight truncate">{place.name}</p>
+                        {place.group && (
+                          <span
+                            className={`font-title text-[10px] px-2 py-0.5 rounded-lg border ${
+                              isSelected
+                                ? 'bg-[#43362E] text-[#F3D5B5] border-[#59483D]'
+                                : 'bg-[#FAF7F2] text-[#7A6251] border-[#EADFCF]'
                             }`}
                           >
-                            {place.address}
-                          </p>
+                            {place.group}
+                          </span>
                         )}
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        onClick={() => {
-                          if (selectedGroup !== '전체') {
-                            toggleVisited(place.id, currentIdx);
-                          }
-                        }}
-                        disabled={selectedGroup === '전체'}
-                        className={`p-1 rounded-xl transition-transform flex items-center justify-center ${
-                          selectedGroup === '전체' ? 'cursor-default' : 'hover:bg-black/5 active:scale-90'
-                        }`}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          width="26"
-                          height="26"
-                          viewBox="0 0 24 24"
-                          fill={style.fill}
-                          stroke={style.stroke}
-                          strokeWidth={style.strokeWidth}
-                          className="drop-shadow-xs transition-all"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
-                          />
-                        </svg>
-                      </button>
-                      {selectedGroup !== '전체' && (
-                        <button
-                          onClick={() => removePlaceItem(place.id, currentIdx)}
-                          className={`font-title text-xs px-2 py-1 rounded transition ${
-                            isSelected ? 'text-[#8C7A6B] hover:text-white' : 'text-[#A89889] hover:text-[#C25E3E]'
+                      {place.address && (
+                        <p
+                          className={`font-body text-xs mt-0.5 truncate max-w-[210px] ${
+                            isSelected ? 'text-[#C8B8A6]' : 'text-[#8C7A6B]'
                           }`}
                         >
-                          ✕
-                        </button>
+                          {place.address}
+                        </p>
                       )}
                     </div>
                   </div>
-                );
-              });
-            })()
+                  <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedGroup !== '전체') {
+                          toggleVisited(place.id);
+                        }
+                      }}
+                      disabled={selectedGroup === '전체'}
+                      className={`p-1 rounded-xl transition-transform flex items-center justify-center ${
+                        selectedGroup === '전체' ? 'cursor-default' : 'hover:bg-black/5 active:scale-90'
+                      }`}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="26"
+                        height="26"
+                        viewBox="0 0 24 24"
+                        fill={style.fill}
+                        stroke={style.stroke}
+                        strokeWidth={style.strokeWidth}
+                        className="drop-shadow-xs transition-all"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+                        />
+                      </svg>
+                    </button>
+                    {selectedGroup !== '전체' && (
+                      <button
+                        type="button"
+                        onClick={() => removePlaceItem(place.id)}
+                        className={`font-title text-xs px-2 py-1 rounded transition ${
+                          isSelected ? 'text-[#8C7A6B] hover:text-white' : 'text-[#A89889] hover:text-[#C25E3E]'
+                        }`}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })
           )}
         </div>
       </div>
 
       {groupToDelete && (
         <div className="fixed inset-0 z-50 bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 text-center">
+          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 text-center animate-in zoom-in-95 duration-150">
             <span className="text-3xl mt-1">🗑️</span>
             <div>
               <h3 className="font-title text-base text-[#2D241E]">'{groupToDelete}' 그룹 삭제</h3>
-              <p className="font-body text-xs text-[#8C7A6B] mt-1.5 leading-relaxed">
-                그룹과 포함된 모든 장소들이 함께 삭제됩니다.
+              <p className="font-body text-xs text-[#8C7A6B] mt-1.5 leading-relaxed break-keep">
+                그룹은 삭제되고, 포함된 장소는 기본 찜으로 이동합니다.
                 <br />
                 정말 삭제하시겠습니까?
               </p>
             </div>
             <div className="flex gap-2 mt-2">
               <button
+                type="button"
                 onClick={() => setGroupToDelete(null)}
                 className="font-title flex-1 py-2.5 bg-white border-2 border-[#EADFCF] hover:bg-[#FAF7F2] text-[#7A6251] text-xs rounded-xl transition active:scale-95"
               >
                 취소
               </button>
               <button
+                type="button"
                 onClick={confirmDeleteGroup}
                 className="font-title flex-1 py-2.5 bg-[#C25E3E] hover:bg-[#B04E30] text-white text-xs rounded-xl transition active:scale-95 shadow-xs"
               >
@@ -1339,10 +1533,11 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
 
       {showAddGroupModal && (
         <div className="fixed inset-0 z-50 bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4">
+          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-1 border-b border-[#EADFCF]">
               <h3 className="font-title text-base">새 찜 그룹 만들기</h3>
               <button
+                type="button"
                 onClick={() => setShowAddGroupModal(false)}
                 className="font-title text-[#A89889] hover:text-[#2D241E] text-sm"
               >
@@ -1354,7 +1549,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
                 <label className="font-title text-xs text-[#7A6251]">그룹 이름</label>
                 <input
                   type="text"
-                  placeholder="예: 서울, 9월 10일 약속, 홍대"
+                  placeholder="예: 홍대, 9월 10일 약속, 방탈출 카페"
                   value={newGroupName}
                   onChange={(e) => setNewGroupName(e.target.value)}
                   required
@@ -1382,7 +1577,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
               </div>
               <button
                 type="submit"
-                className="font-title w-full py-3 bg-[#2D241E] hover:bg-[#43362E] text-white text-xs rounded-xl transition mt-2"
+                className="font-title w-full py-3 bg-[#2D241E] hover:bg-[#43362E] text-white text-xs rounded-xl transition mt-2 active:scale-95 shadow-xs"
               >
                 그룹 추가하기
               </button>

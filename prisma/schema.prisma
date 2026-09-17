@@ -1,0 +1,107 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  createdAt DateTime @default(now())
+
+  roomMembers  RoomMember[]
+  savedCourses SavedCourse[]
+  foodPicks    DailyFoodPick[]
+}
+
+model Room {
+  id                  String   @id @default(uuid())
+  code                String   @unique
+  title               String
+  defaultHeartColorId String   @default("pastel-pink")
+  courseFolders       String[] @default(["기본 폴더"])
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @default(now()) @updatedAt
+
+  members      RoomMember[]
+  groups       PlaceGroup[]
+  places       RoomPlace[]
+  savedCourses SavedCourse[]
+  foodPicks    DailyFoodPick[]
+}
+
+model RoomMember {
+  id       String   @id @default(uuid())
+  roomId   String
+  userId   String
+  joinedAt DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+}
+
+model PlaceGroup {
+  id      String @id @default(uuid())
+  roomId  String
+  name    String
+  colorId String @default("pastel-pink")
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, name])
+}
+
+model RoomPlace {
+  id          String   @id @default(uuid())
+  roomId      String
+  kakaoId     String
+  name        String
+  category    String
+  subCategory String?
+  address     String
+  lat         Float
+  lng         Float
+  placeUrl    String?
+  isVisited   Boolean  @default(false)
+  groupName   String?
+  createdAt   DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
+
+model SavedCourse {
+  id          String   @id @default(uuid())
+  roomId      String
+  userId      String
+  folderName  String   @default("기본 폴더")
+  courseTitle String
+  summary     String
+  location    String
+  steps       Json
+  createdAt   DateTime @default(now())
+
+  room   Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model DailyFoodPick {
+  id        String   @id @default(uuid())
+  roomId    String
+  userId    String
+  date      String
+  menuName  String
+  category  String
+  createdAt DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId, date])
+}

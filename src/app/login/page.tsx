@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { loginUser, registerUser } from '@/lib/authMock';
+
+const STORAGE_SESSION_KEY = 'routy_session_user';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -12,11 +13,12 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
 
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
-  // 1. 회원가입 핸들러
-  const handleSignUp = (e: React.FormEvent) => {
+  // 1. 회원가입 핸들러 (실제 DB API 통신)
+  const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccessMsg('');
@@ -26,42 +28,128 @@ export default function LoginPage() {
       return;
     }
 
-    const res = registerUser(username, password);
-    if (!res.success) {
-      setError(res.message);
-      return;
-    }
+    setIsLoading(true);
+    try {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'register',
+          username: username.trim(),
+          password,
+        }),
+      });
 
-    setSuccessMsg('회원가입이 완료되었습니다! 로그인해주세요 🎉');
-    setMode('login');
-    setPassword('');
-    setPasswordConfirm('');
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || '회원가입에 실패했습니다.');
+        return;
+      }
+
+      setSuccessMsg('회원가입이 완료되었습니다! 로그인해주세요 🎉');
+      setMode('login');
+      setPassword('');
+      setPasswordConfirm('');
+    } catch (err) {
+      console.error(err);
+      setError('서버와 통신하는 중 오류가 발생했습니다.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // 2. 로그인 핸들러
-  const handleLogin = (e: React.FormEvent) => {
+  // 2. 로그인 핸들러 (실제 DB API 통신)
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccessMsg('');
 
-    const res = loginUser(username, password);
-    if (!res.success) {
-      setError(res.message);
-      return;
-    }
+    setIsLoading(true);
+    try {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'login',
+          username: username.trim(),
+          password,
+        }),
+      });
 
-    router.push('/');
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || '로그인에 실패했습니다.');
+        return;
+      }
+
+      // 세션에 현재 사용자 저장 후 메인으로 이동
+      sessionStorage.setItem(STORAGE_SESSION_KEY, data.username);
+      router.push('/');
+    } catch (err) {
+      console.error(err);
+      setError('서버와 통신하는 중 오류가 발생했습니다.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // 3. 심사용 원터치 빠른 로그인 (routy, admin, user)
-  const handleQuickLogin = (targetUser: 'routy' | 'admin' | 'user') => {
+  // 3. 심사용 원터치 빠른 로그인 (계정이 없으면 DB에 자동 가입 후 로그인)
+  const handleQuickLogin = async (targetUser: 'routy' | 'admin' | 'user') => {
     setError('');
     setSuccessMsg('');
-    const res = loginUser(targetUser, '1234');
-    if (res.success) {
-      router.push('/');
-    } else {
-      setError(res.message);
+    setIsLoading(true);
+
+    try {
+      // 1차: 로그인 시도
+      let res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'login',
+          username: targetUser,
+          password: '1234',
+        }),
+      });
+
+      let data = await res.json();
+
+      // DB에 계정이 아직 없다면 자동으로 회원가입 후 재로그인
+      if (!res.ok) {
+        await fetch('/api/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'register',
+            username: targetUser,
+            password: '1234',
+          }),
+        });
+
+        res = await fetch('/api/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'login',
+            username: targetUser,
+            password: '1234',
+          }),
+        });
+        data = await res.json();
+      }
+
+      if (res.ok) {
+        sessionStorage.setItem(STORAGE_SESSION_KEY, data.username);
+        router.push('/');
+      } else {
+        setError(data.error || '빠른 로그인에 실패했습니다.');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('서버와 통신하는 중 오류가 발생했습니다.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -93,7 +181,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        {/* ⚡ 심사위원 & 테스터용 원터치 빠른 로그인 칩 영역 (3개 분할) */}
+        {/* ⚡ 원터치 테스트 로그인 영역 */}
         {mode === 'login' && (
           <div className="bg-[#F5EDE1] border border-[#E5D7C4] rounded-2xl p-3.5 flex flex-col gap-2 shadow-2xs">
             <div className="flex items-center justify-between px-0.5">
@@ -105,26 +193,26 @@ export default function LoginPage() {
             <div className="grid grid-cols-3 gap-1.5">
               <button
                 type="button"
+                disabled={isLoading}
                 onClick={() => handleQuickLogin('routy')}
-                className="font-title py-2 px-1 bg-white hover:bg-[#FAF7F2] border border-[#DFCBB5] text-[#2D241E] text-[11px] rounded-xl shadow-2xs transition active:scale-95 flex items-center justify-center gap-1"
+                className="font-title py-2 px-1 bg-white hover:bg-[#FAF7F2] border border-[#DFCBB5] text-[#2D241E] text-[11px] rounded-xl shadow-2xs transition active:scale-95 flex items-center justify-center gap-1 disabled:opacity-50"
               >
-                <span></span>
                 <span>routy</span>
               </button>
               <button
                 type="button"
+                disabled={isLoading}
                 onClick={() => handleQuickLogin('admin')}
-                className="font-title py-2 px-1 bg-white hover:bg-[#FAF7F2] border border-[#DFCBB5] text-[#2D241E] text-[11px] rounded-xl shadow-2xs transition active:scale-95 flex items-center justify-center gap-1"
+                className="font-title py-2 px-1 bg-white hover:bg-[#FAF7F2] border border-[#DFCBB5] text-[#2D241E] text-[11px] rounded-xl shadow-2xs transition active:scale-95 flex items-center justify-center gap-1 disabled:opacity-50"
               >
-                <span></span>
                 <span>admin</span>
               </button>
               <button
                 type="button"
+                disabled={isLoading}
                 onClick={() => handleQuickLogin('user')}
-                className="font-title py-2 px-1 bg-white hover:bg-[#FAF7F2] border border-[#DFCBB5] text-[#2D241E] text-[11px] rounded-xl shadow-2xs transition active:scale-95 flex items-center justify-center gap-1"
+                className="font-title py-2 px-1 bg-white hover:bg-[#FAF7F2] border border-[#DFCBB5] text-[#2D241E] text-[11px] rounded-xl shadow-2xs transition active:scale-95 flex items-center justify-center gap-1 disabled:opacity-50"
               >
-                <span></span>
                 <span>user</span>
               </button>
             </div>
@@ -211,12 +299,12 @@ export default function LoginPage() {
 
             {/* 에러 및 성공 메시지 */}
             {error && (
-              <p className="font-body text-xs text-[#C25E3E] bg-[#F9ECE7] border border-[#F2D1C5] px-3.5 py-2.5 rounded-xl text-center">
+              <p className="font-body text-xs text-[#C25E3E] bg-[#F9ECE7] border border-[#F2D1C5] px-3.5 py-2.5 rounded-xl text-center break-keep">
                 ⚠️ {error}
               </p>
             )}
             {successMsg && (
-              <p className="font-body text-xs text-[#5B8C51] bg-[#F1F7EE] border border-[#D5E8CE] px-3.5 py-2.5 rounded-xl text-center">
+              <p className="font-body text-xs text-[#5B8C51] bg-[#F1F7EE] border border-[#D5E8CE] px-3.5 py-2.5 rounded-xl text-center break-keep">
                 {successMsg}
               </p>
             )}
@@ -224,9 +312,17 @@ export default function LoginPage() {
             {/* 제출 버튼 */}
             <button
               type="submit"
-              className="font-title mt-2 py-3.5 bg-[#2D241E] hover:bg-[#43362E] active:scale-[0.98] text-[#FAF7F2] text-xs rounded-2xl transition shadow-sm"
+              disabled={isLoading}
+              className="font-title mt-2 py-3.5 bg-[#2D241E] hover:bg-[#43362E] active:scale-[0.98] text-[#FAF7F2] text-xs rounded-2xl transition shadow-sm disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              {mode === 'login' ? '로그인하기' : '가입 완료하기'}
+              {isLoading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>처리 중...</span>
+                </>
+              ) : (
+                <span>{mode === 'login' ? '로그인하기' : '가입 완료하기'}</span>
+              )}
             </button>
           </form>
         </div>
@@ -234,7 +330,7 @@ export default function LoginPage() {
 
       {/* 푸터 */}
       <footer className="font-body text-center text-[11px] text-[#A89889] pt-6">
-        🔒 해커톤 시연용 서비스로, 개인정보는 일절 수집하지 않습니다.
+        🔒 실시간 데이터베이스(Supabase)와 안전하게 연동되어 있습니다.
       </footer>
     </main>
   );

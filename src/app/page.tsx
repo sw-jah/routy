@@ -9,7 +9,6 @@ export default function HomePage() {
   const router = useRouter();
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
-  const [showPlannerNotice, setShowPlannerNotice] = useState(false);
 
   useEffect(() => {
     const user = getCurrentUser();
@@ -76,9 +75,9 @@ export default function HomePage() {
         <div className="flex flex-col gap-3.5">
           
           {/* 1. AI 플래너 카드 */}
-          <div
-            onClick={() => setShowPlannerNotice(true)}
-            className="group relative p-7 rounded-[32px] bg-[#2D241E] text-white shadow-[0_16px_36px_rgba(45,36,30,0.18)] overflow-hidden transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] border-2 border-[#1E1713] cursor-pointer flex flex-col justify-between min-h-[200px]"
+          <Link
+            href="/course"
+            className="group relative p-7 rounded-[32px] bg-[#2D241E] text-white shadow-[0_16px_36px_rgba(45,36,30,0.18)] overflow-hidden transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] border-2 border-[#1E1713] cursor-pointer flex flex-col justify-between min-h-[190px]"
           >
             <div className="absolute -top-10 -right-10 w-52 h-52 bg-gradient-to-br from-[#C25E3E]/40 via-[#E07A5F]/20 to-transparent rounded-full blur-3xl pointer-events-none" />
             
@@ -87,21 +86,47 @@ export default function HomePage() {
                 ✨
               </span>
               <span className="font-title text-[10px] px-2.5 py-1 rounded-full bg-[#3B2F27] text-[#E8DCC4] border border-[#524237]">
-                오픈 준비중
+                AI 추천
               </span>
             </div>
 
-            <div className="relative z-10 mt-5">
+            <div className="relative z-10 mt-4">
               <h2 className="font-title text-2xl tracking-tight text-[#FAF7F2] group-hover:text-[#F3D5B5] transition-colors flex items-center gap-1.5">
                 AI 플래너 <span className="text-[#C25E3E]">→</span>
               </h2>
               <p className="font-body text-xs font-normal text-[#C8B8A6] mt-1.5 leading-relaxed">
-                모임의 목적, 예산, 이동 거리에 딱 맞는 최적의 동선과 풀코스 일정을 AI가 1초 만에 설계해 드립니다.
+                만날 위치, 선호 시간, 취향에 맞춘 최적의 동선과 풀코스 일정을 <br />AI가 한 번에 완성해 드립니다.
               </p>
             </div>
-          </div>
+          </Link>
 
-          {/* 2. 약속 찜 지도 (🤎 딥 베이지 테마) */}
+          {/* 2. 코스 보관함 (신규 추가된 폴더 페이지) */}
+          <Link
+            href="/folders"
+            className="group relative p-4.5 rounded-[24px] bg-[#F5EDE1] border-2 border-[#E3D4C1] shadow-[0_4px_16px_rgba(74,59,50,0.06)] hover:border-[#D5C2AD] hover:bg-[#F0E5D5] transition-all flex items-center justify-between active:scale-[0.99]"
+          >
+            <div className="flex items-center gap-3">
+              <span className="w-11 h-11 rounded-2xl bg-white border border-[#E3D4C1] flex items-center justify-center text-xl shrink-0 shadow-2xs">
+                📁
+              </span>
+              <div className="text-left">
+                <h3 className="font-title text-base text-[#2D241E] group-hover:text-[#C25E3E] transition-colors">
+                  코스 보관함 (폴더)
+                </h3>
+                <p className="font-body text-xs text-[#7A6251] mt-0.5">
+                AI 플래너로 확정한 풀코스 플랜들을 방/폴더별로
+                <br />
+                모아보세요!
+              </p>
+
+              </div>
+            </div>
+            <span className="font-title text-xs text-[#523F30] group-hover:text-[#C25E3E] group-hover:translate-x-1 transition-all pl-2 font-bold">
+              GO →
+            </span>
+          </Link>
+
+          {/* 3. 약속 찜 지도 */}
           <Link
             href="/map"
             className="group relative p-4.5 rounded-[24px] bg-[#EFE6D8] border-2 border-[#DFCBB5] shadow-[0_4px_16px_rgba(74,59,50,0.06)] hover:border-[#CFB69C] hover:bg-[#E8DDCD] transition-all flex items-center justify-between active:scale-[0.99]"
@@ -115,7 +140,8 @@ export default function HomePage() {
                   약속 찜 지도
                 </h3>
                 <p className="font-body text-xs text-[#6D5441] mt-0.5">
-                  가고 싶은 곳을 찜하고 공유해보세요!
+                  가고 싶은 장소를 하트로 찜하고 친구와 함께 
+                  <br />공유해보세요!
                 </p>
               </div>
             </div>
@@ -124,7 +150,7 @@ export default function HomePage() {
             </span>
           </Link>
 
-          {/* 3. 맛집 어디가지? */}
+          {/* 4. 밥집 어디가지? */}
           <Link
             href="/restaurant"
             className="group relative p-4.5 rounded-[24px] bg-white border-2 border-[#EADFCF] shadow-[0_4px_16px_rgba(74,59,50,0.03)] hover:border-[#D5C2AD] transition-all flex items-center justify-between active:scale-[0.99]"
@@ -147,7 +173,7 @@ export default function HomePage() {
             </span>
           </Link>
 
-          {/* 4. 카페 어디가지? */}
+          {/* 5. 카페 어디가지? */}
           <Link
             href="/cafe"
             className="group relative p-4.5 rounded-[24px] bg-white border-2 border-[#EADFCF] shadow-[0_4px_16px_rgba(74,59,50,0.03)] hover:border-[#D5C2AD] transition-all flex items-center justify-between active:scale-[0.99]"
@@ -176,26 +202,6 @@ export default function HomePage() {
       <footer className="font-title text-center text-xs text-[#A89889] pt-6">
         ROUTY · CURATED FOR US
       </footer>
-
-      {showPlannerNotice && (
-        <div className="fixed inset-0 z-50 bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[30px] p-6 shadow-2xl border-2 border-[#EADFCF] text-center flex flex-col gap-3">
-            <span className="text-3xl">✨</span>
-            <div>
-              <h4 className="font-title text-base">AI 플래너 준비 중</h4>
-              <p className="font-body text-xs text-[#8C7A6B] mt-1 leading-relaxed">
-                더 스마트한 맞춤 코스 추천 엔진을 작업하고 있습니다. 곧 완성될 예정입니다!
-              </p>
-            </div>
-            <button
-              onClick={() => setShowPlannerNotice(false)}
-              className="font-title mt-2 py-3 bg-[#2D241E] text-white text-xs rounded-xl hover:bg-[#43362E] transition active:scale-95"
-            >
-              확인
-            </button>
-          </div>
-        </div>
-      )}
     </main>
   );
 }

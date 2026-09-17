@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/authMock';
 
@@ -10,21 +10,23 @@ interface FoodDetail {
   date?: string;
 }
 
+interface MemberPickResult {
+  username: string;
+  menuName: string;
+  category: string;
+  isCompleted: boolean;
+}
+
 const ROOT_OPTIONS = [
   { label: '🍜 호로록 면 요리', value: '면 요리' },
   { label: '🍚 든든한 밥 요리', value: '밥 요리' },
   { label: '🥩 굽고 뜯는 고기 요리', value: '고기 요리' },
 ];
 
-const getTodayDateString = () => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
-
 export default function FoodBalanceGame() {
+  const [currentUser, setCurrentUser] = useState<string>('');
+  const [activeRoomCode, setActiveRoomCode] = useState<string>('');
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [step, setStep] = useState(0);
   const [history, setHistory] = useState<string[]>([]);
@@ -32,46 +34,52 @@ export default function FoodBalanceGame() {
 
   const [aiQuestion, setAiQuestion] = useState<string>('');
   const [aiOptions, setAiOptions] = useState<{ a: string; b: string } | null>(null);
-  
+
   const [myResult, setMyResult] = useState<FoodDetail | null>(null);
-  
-  const [roomMembers, setRoomMembers] = useState<string[]>([]);
-  const [activeRoomCode, setActiveRoomCode] = useState<string>('');
+  const [memberResults, setMemberResults] = useState<MemberPickResult[]>([]);
+  const [isSyncingMembers, setIsSyncingMembers] = useState(false);
 
-  useEffect(() => {
-    const currentUser = getCurrentUser() || '';
-    const activeCode = localStorage.getItem('routy_current_room_code') || '';
-    setActiveRoomCode(activeCode);
+  // 1. 방 멤버들의 오늘 메뉴 현황 서버에서 불러오기
+  const fetchTodayRoomPicks = useCallback(async (roomCode: string, user: string) => {
+    if (!roomCode) return;
+    setIsSyncingMembers(true);
+    try {
+      const res = await fetch(`/api/food-pick?roomCode=${encodeURIComponent(roomCode)}`);
+      if (!res.ok) return;
 
-    const allRooms = JSON.parse(localStorage.getItem('routy_rooms_v2') || '[]');
-    const currentRoom = allRooms.find((r: any) => r.code === activeCode);
-    
-    let members = [currentUser];
-    if (currentRoom && currentRoom.members) {
-      members = [...currentRoom.members];
-    }
-    setRoomMembers(members);
+      const data = await res.json();
+      const results: MemberPickResult[] = data.results || [];
+      setMemberResults(results);
 
-    // 자정 기준 자동 리셋 확인
-    const today = getTodayDateString();
-    const storageKey = `routy_food_result_${activeCode}_${currentUser}`;
-    const myPickRaw = localStorage.getItem(storageKey);
-
-    if (myPickRaw) {
-      try {
-        const parsed = JSON.parse(myPickRaw);
-        if (parsed.date === today) {
-          setMyResult(parsed);
-        } else {
-          localStorage.removeItem(storageKey);
-          setMyResult(null);
-        }
-      } catch {
-        localStorage.removeItem(storageKey);
+      // 내 오늘 결과가 이미 DB에 있으면 반영
+      const myPick = results.find((r) => r.username === user && r.isCompleted);
+      if (myPick) {
+        setMyResult({
+          menuName: myPick.menuName,
+          category: myPick.category,
+          date: data.today,
+        });
+      } else {
         setMyResult(null);
       }
+    } catch (e) {
+      console.error('오늘 메뉴 현황 조회 실패:', e);
+    } finally {
+      setIsSyncingMembers(false);
     }
   }, []);
+
+  useEffect(() => {
+    const user = getCurrentUser() || '';
+    const activeCode = localStorage.getItem('routy_current_room_code') || '';
+
+    setCurrentUser(user);
+    setActiveRoomCode(activeCode);
+
+    if (activeCode) {
+      fetchTodayRoomPicks(activeCode, user);
+    }
+  }, [fetchTodayRoomPicks]);
 
   const startGame = () => {
     setIsPlaying(true);
@@ -110,16 +118,31 @@ export default function FoodBalanceGame() {
       if (data.isFinal) {
         setIsPlaying(false);
         const finalResult: FoodDetail = {
-          ...data,
-          date: getTodayDateString(),
+          menuName: data.menuName,
+          category: data.category,
         };
         setMyResult(finalResult);
-        
-        const currentUser = getCurrentUser() || '';
-        localStorage.setItem(
-          `routy_food_result_${activeRoomCode}_${currentUser}`,
-          JSON.stringify(finalResult)
-        );
+
+        // 💡 실제 DB(/api/food-pick)에 오늘 내 픽 저장
+        if (activeRoomCode && currentUser) {
+          try {
+            await fetch('/api/food-pick', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                roomCode: activeRoomCode,
+                username: currentUser,
+                menuName: data.menuName,
+                category: data.category,
+              }),
+            });
+
+            // 저장 후 방 현황판 즉시 재동기화
+            fetchTodayRoomPicks(activeRoomCode, currentUser);
+          } catch (err) {
+            console.error('오늘 메뉴 저장 실패:', err);
+          }
+        }
       } else {
         setAiQuestion(data.question);
         setAiOptions({ a: data.optionA, b: data.optionB });
@@ -133,7 +156,6 @@ export default function FoodBalanceGame() {
 
   return (
     <div className="flex flex-col gap-4 text-[#2D241E]">
-      
       {/* 밸런스 게임 카드 */}
       <div className="bg-white rounded-[30px] p-6 border-2 border-[#EADFCF] shadow-[0_8px_24px_rgba(74,59,50,0.04)] min-h-[360px] flex flex-col justify-center relative overflow-hidden">
         {isLoading ? (
@@ -161,6 +183,7 @@ export default function FoodBalanceGame() {
               </p>
             </div>
             <button
+              type="button"
               onClick={startGame}
               className="font-title mt-2 px-8 py-3.5 bg-[#2D241E] hover:bg-[#43362E] active:scale-[0.98] text-[#F9F6F0] text-xs rounded-2xl transition shadow-md"
             >
@@ -169,7 +192,6 @@ export default function FoodBalanceGame() {
           </div>
         ) : isPlaying ? (
           <div className="flex flex-col h-full w-full animate-in fade-in zoom-in-[0.98] duration-200">
-            {/* 상단: 이전 답변 목록 제거, 단계 배지만 단정하게 표시 */}
             <div className="text-center mb-5">
               <span className="font-title text-[11px] text-[#C25E3E] bg-[#F9ECE7] px-3 py-1 rounded-full border border-[#F2D1C5] inline-block mb-3">
                 STEP {step + 1} / 5
@@ -184,6 +206,7 @@ export default function FoodBalanceGame() {
                 {ROOT_OPTIONS.map((opt) => (
                   <button
                     key={opt.value}
+                    type="button"
                     onClick={() => handleRootSelect(opt.value)}
                     className="w-full py-4 px-5 bg-[#FAF7F2] hover:bg-[#F5EFE6] border-2 border-[#EADFCF] hover:border-[#C25E3E]/50 text-[#2D241E] rounded-2xl transition-all text-left flex items-center justify-between active:scale-[0.99]"
                   >
@@ -196,6 +219,7 @@ export default function FoodBalanceGame() {
               aiOptions && (
                 <div className="flex flex-col gap-3 flex-1 justify-center">
                   <button
+                    type="button"
                     onClick={() => handleBranchSelect(aiOptions.a)}
                     className="font-title w-full min-h-[60px] py-3.5 px-5 bg-[#FAF7F2] hover:bg-[#FDF4F0] border-2 border-[#EADFCF] hover:border-[#C25E3E] text-[#2D241E] rounded-2xl text-xs sm:text-sm transition-all active:scale-[0.98] leading-snug break-keep text-balance text-center flex items-center justify-center shadow-2xs"
                   >
@@ -206,6 +230,7 @@ export default function FoodBalanceGame() {
                     <div className="absolute top-1/2 left-8 right-8 h-px bg-[#EADFCF] -z-0" />
                   </div>
                   <button
+                    type="button"
                     onClick={() => handleBranchSelect(aiOptions.b)}
                     className="font-title w-full min-h-[60px] py-3.5 px-5 bg-[#FAF7F2] hover:bg-[#F3F7F8] border-2 border-[#EADFCF] hover:border-[#4B7280] text-[#2D241E] rounded-2xl text-xs sm:text-sm transition-all active:scale-[0.98] leading-snug break-keep text-balance text-center flex items-center justify-center shadow-2xs"
                   >
@@ -236,6 +261,7 @@ export default function FoodBalanceGame() {
                 근처 {myResult?.category || '밥집'} 찾기 🍽️
               </Link>
               <button
+                type="button"
                 onClick={startGame}
                 className="font-title px-4 py-3.5 bg-[#FAF7F2] hover:bg-[#F1EAE0] border-2 border-[#EADFCF] active:scale-[0.98] text-[#2D241E] text-xs rounded-2xl transition"
               >
@@ -246,57 +272,58 @@ export default function FoodBalanceGame() {
         )}
       </div>
 
-      {/* 방 멤버 현황판 */}
+      {/* 방 멤버 현황판 (실시간 DB 동기화) */}
       <div className="bg-white rounded-[26px] p-5 border-2 border-[#EADFCF] shadow-[0_4px_16px_rgba(74,59,50,0.03)] flex flex-col gap-3">
         <div className="flex justify-between items-center pb-2 border-b border-[#F2EAE0]">
           <span className="font-title text-xs text-[#2D241E]">
-            우리 방의 오늘 메뉴 현황 <span className="text-[#A89889]">({roomMembers.length <= 4 ? roomMembers.length : 4}명)</span>
+            우리 방의 오늘 메뉴 현황 <span className="text-[#A89889]">({memberResults.length || 1}명)</span>
           </span>
-          <button onClick={() => window.location.reload()} className="font-title text-[10px] text-[#7A6251] bg-[#F7F2EB] border border-[#EADFCF] px-2.5 py-1 rounded-lg hover:bg-[#F3ECE0] transition">
-            새로고침 🔄
+          <button
+            type="button"
+            onClick={() => fetchTodayRoomPicks(activeRoomCode, currentUser)}
+            disabled={isSyncingMembers}
+            className="font-title text-[10px] text-[#7A6251] bg-[#F7F2EB] border border-[#EADFCF] px-2.5 py-1 rounded-lg hover:bg-[#F3ECE0] transition active:scale-95 disabled:opacity-50"
+          >
+            {isSyncingMembers ? '동기화 중...' : '새로고침 🔄'}
           </button>
         </div>
 
-        <div className="flex gap-2 w-full overflow-x-auto pb-1">
-          {roomMembers.map((member, idx) => {
-            const currentUser = getCurrentUser() || '';
-            const isMe = member === currentUser;
-            const isWaiting = member === '초대 대기중';
-            
-            const today = getTodayDateString();
-            const pickKey = `routy_food_result_${activeRoomCode}_${member}`;
-            const pickRaw = localStorage.getItem(pickKey);
-            let pickName = '';
+        {memberResults.length === 0 ? (
+          <div className="py-4 text-center text-xs text-[#8C7A6B]">
+            {activeRoomCode ? '방 멤버 정보를 불러오는 중...' : '약속 찜 지도에서 방을 먼저 선택해주세요.'}
+          </div>
+        ) : (
+          <div className="flex gap-2 w-full overflow-x-auto pb-1">
+            {/* 💡 현재 로그인한 유저가 제일 왼쪽에 오도록 정렬 */}
+            {[...memberResults]
+              .sort((a, b) => {
+                if (a.username === currentUser) return -1;
+                if (b.username === currentUser) return 1;
+                return 0;
+              })
+              .map((member, idx) => {
+                const isMe = member.username === currentUser;
 
-            if (pickRaw) {
-              try {
-                const parsed = JSON.parse(pickRaw);
-                if (parsed.date === today) {
-                  pickName = parsed.menuName;
-                } else {
-                  localStorage.removeItem(pickKey);
-                }
-              } catch {
-                pickName = '';
-              }
-            }
-
-            return (
-              <div key={`member-${idx}`} className="flex-1 flex flex-col gap-1.5 min-w-[70px]">
-                <span className="font-title text-[10px] text-[#8C7A6B] uppercase tracking-wider text-center truncate px-1">
-                  {isMe ? 'My Pick' : isWaiting ? 'Partner' : `${member}`}
-                </span>
-                <div className={`font-title p-2 rounded-2xl border-2 text-[11px] text-center flex items-center justify-center h-[52px] break-keep ${
-                  pickName ? 'bg-[#F9ECE7] border-[#F2D1C5] text-[#C25E3E]' : 'bg-[#FAF7F2] border-[#EADFCF] text-[#A89889] border-dashed'
-                }`}>
-                  {pickName ? pickName : isWaiting ? '대기중 ⏳' : '미참여'}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                return (
+                  <div key={`member-pick-${idx}`} className="flex-1 flex flex-col gap-1.5 min-w-[75px]">
+                    <span className="font-title text-[10px] text-[#8C7A6B] uppercase tracking-wider text-center truncate px-1">
+                      {isMe ? `${member.username} (나)` : member.username}
+                    </span>
+                    <div
+                      className={`font-title p-2 rounded-2xl border-2 text-[11px] text-center flex items-center justify-center h-[54px] break-keep ${
+                        member.isCompleted
+                          ? 'bg-[#F9ECE7] border-[#F2D1C5] text-[#C25E3E]'
+                          : 'bg-[#FAF7F2] border-[#EADFCF] text-[#A89889] border-dashed'
+                      }`}
+                    >
+                      {member.isCompleted ? member.menuName : '미참여 ⏳'}
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        )}
       </div>
-
     </div>
   );
 }

@@ -1,34 +1,8 @@
 @import "tailwindcss";
 
-/* 1. 지마켓 산스 Bold */
-@font-face {
-  font-family: 'GmarketSansBold';
-  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2001@1.1/GmarketSansBold.woff') format('woff');
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
-/* 2. 에스코어 드림 Regular & Bold */
-@font-face {
-  font-family: 'S-CoreDream';
-  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-4Regular.woff') format('woff');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'S-CoreDream';
-  src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_six@1.2/S-CoreDream-6Bold.woff') format('woff');
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
 @layer base {
   body {
-    font-family: 'S-CoreDream', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    font-family: var(--font-score), -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
     background-color: #FAF7F2;
     color: #2D241E;
     letter-spacing: -0.02em;
@@ -39,11 +13,11 @@
 /* 제목 전용 유틸리티 */
 .font-title,
 .font-title * {
-  font-family: 'GmarketSansBold', sans-serif !important;
+  font-family: var(--font-gmarket), sans-serif !important;
   font-weight: 700 !important;
 }
 
 /* 본문 전용 유틸리티 */
 .font-body {
-  font-family: 'S-CoreDream', sans-serif !important;
+  font-family: var(--font-score), sans-serif !important;
 }
