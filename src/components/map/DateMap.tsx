@@ -1,3 +1,4 @@
+// src/components/map/DateMap.tsx
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -57,6 +58,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
   const [currentUser, setCurrentUser] = useState<string>('');
   const [rooms, setRooms] = useState<MapRoom[]>([]);
   const [activeCode, setActiveCode] = useState<string>('');
+  const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true); // 💡 초기 방 데이터 로딩 상태 분기
 
   const [selectedGroup, setSelectedGroup] = useState<string>('전체');
 
@@ -120,6 +122,8 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
       console.error(err);
       setStatus('error');
       setErrorMessage(err?.message || '방 목록 로드 실패');
+    } finally {
+      setIsInitialLoading(false); // 💡 조회가 끝나면 초기 로딩 완료
     }
   }, []);
 
@@ -130,6 +134,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     if (user) {
       fetchMyRooms(user);
     } else {
+      setIsInitialLoading(false);
       setStatus('ready');
     }
   }, [fetchMyRooms]);
@@ -180,7 +185,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         return { fill: '#FAF7F2', stroke: '#D5C2AD', strokeWidth: '2.5' };
       }
 
-      // 기본 그룹도 실제 그룹처럼 색상을 적용한다.
       const allGroups = [
         ...DEFAULT_GROUPS,
         ...(currentRoom?.groups || []).filter((g) => g.name !== '기본 그룹'),
@@ -382,7 +386,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     }
   }, [selectedGroup, mapReady, status, currentRoom]);
 
-  // 💡 하트 방문 여부 토글 (DB API 연동 및 낙관적 UI 업데이트)
+  // 하트 방문 여부 토글
   const toggleVisited = async (placeId: string) => {
     if (!currentRoom) return;
     const targetPlace = currentRoom.places.find((p) => p.id === placeId);
@@ -390,7 +394,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
 
     const nextVisited = !targetPlace.isVisited;
 
-    // 1. UI 즉시 반영
     setRooms((prevRooms) =>
       prevRooms.map((r) =>
         r.code === currentRoom.code
@@ -402,7 +405,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
       )
     );
 
-    // 2. DB 동기화
     try {
       await fetch('/api/places/sync', {
         method: 'POST',
@@ -416,7 +418,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
       });
     } catch (err) {
       console.error('방문 상태 저장 실패:', err);
-      // 실패 시 롤백
       fetchMyRooms(currentUser, currentRoom.code);
     }
   };
@@ -436,11 +437,9 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     mapInstanceRef.current.panTo(new window.kakao.maps.LatLng(place.lat, place.lng));
   };
 
-  // 💡 찜 장소 삭제 (DB 연동)
   const removePlaceItem = async (placeId: string) => {
     if (!currentRoom) return;
 
-    // 1. UI 즉시 반영
     setRooms((prevRooms) =>
       prevRooms.map((r) =>
         r.code === currentRoom.code
@@ -450,7 +449,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     );
     if (selectedPlaceId === placeId) setSelectedPlaceId(null);
 
-    // 2. DB 연동
     try {
       await fetch('/api/places/sync', {
         method: 'POST',
@@ -467,18 +465,14 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     }
   };
 
-  // 그룹 하트 색상 변경
   const handleUpdateActiveColor = async (newColorId: string) => {
     if (!currentRoom || selectedGroup === '전체') return;
 
-    // 기본 그룹은 기본값으로 고정해 두고, 사용자가 색상을 바꾸는 대상은
-    // 기본 찜 / 커스텀 그룹으로 한정한다.
     if (selectedGroup === '기본 그룹') {
       setActiveColorPicker(false);
       return;
     }
 
-    // UI 즉시 반영
     setRooms((prevRooms) =>
       prevRooms.map((r) => {
         if (r.code !== currentRoom.code) return r;
@@ -494,7 +488,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
       })
     );
 
-    // DB 동기화
     try {
       const res = await fetch('/api/places/sync', {
         method: 'POST',
@@ -519,7 +512,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     }
   };
 
-  // 💡 새 찜 그룹 추가 (DB 연동)
   const handleAddGroup = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = newGroupName.trim();
@@ -558,7 +550,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     }
   };
 
-  // 💡 찜 그룹 삭제 (DB 연동)
   const confirmDeleteGroup = async () => {
     if (!groupToDelete || !currentRoom) return;
 
@@ -584,9 +575,7 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         try {
           const data = await res.json();
           message = data.error || message;
-        } catch {
-          // JSON이 아닌 응답이어도 아래의 사용자 메시지는 유지한다.
-        }
+        } catch {}
         throw new Error(message);
       }
 
@@ -608,7 +597,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     executeSearch(searchQuery);
   };
 
-  // 💡 장소 검색 결과에서 찜하기 (DB 연동)
   const addPlaceFromSearch = async (item: any) => {
     if (!currentRoom) return;
 
@@ -630,7 +618,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
       placeUrl: item.place_url,
     };
 
-    // UI 즉시 반영
     setRooms((prevRooms) =>
       prevRooms.map((r) =>
         r.code === currentRoom.code ? { ...r, places: [newPlace, ...r.places] } : r
@@ -640,7 +627,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     setSearchQuery('');
     focusPlace(newPlace);
 
-    // DB 연동
     try {
       await fetch('/api/places/sync', {
         method: 'POST',
@@ -667,7 +653,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     setShowMembersList(false);
   };
 
-  // 💡 새 방 만들기 (DB 연동)
   const handleCreateRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRoomTitle.trim()) return;
@@ -697,7 +682,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     }
   };
 
-  // 💡 코드로 방 참여 (DB 연동)
   const handleJoinRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     const clean = joinRoomCode.trim().toUpperCase();
@@ -733,7 +717,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     }
   };
 
-  // 💡 친구 아이디로 초대 (DB 연동)
   const handleInviteUser = async (e: React.FormEvent) => {
     e.preventDefault();
     const targetUser = inviteUsernameInput.trim();
@@ -766,7 +749,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     }
   };
 
-  // 💡 방 나가기 (DB 연동)
   const handleConfirmLeaveRoom = async () => {
     if (!currentRoom) return;
 
@@ -795,10 +777,8 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     }
   };
 
-  // 모달 렌더링 (z-[90] 상위 레이어)
   const renderModals = () => (
     <>
-      {/* 1. 방 나가기 확인 모달 */}
       {showLeaveModal && (
         <div className="fixed inset-0 z-[60] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 text-center animate-in zoom-in-95 duration-150">
@@ -829,7 +809,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         </div>
       )}
 
-      {/* 2. 친구 초대 모달 */}
       {showInviteUserModal && (
         <div className="fixed inset-0 z-[60] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 animate-in zoom-in-95 duration-150">
@@ -870,7 +849,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         </div>
       )}
 
-      {/* 3. 약속 방 관리 모달 */}
       {showRoomModal && (
         <div className="fixed inset-0 z-[60] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-sm rounded-[30px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 animate-in zoom-in-95 duration-150">
@@ -950,7 +928,6 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
         </div>
       )}
 
-      {/* 4. 💡 커스텀 알림 모달 (z-[90] 상위 레이어로 전면 노출) */}
       {alertModalMessage && (
         <div className="fixed inset-0 z-[90] bg-[#2D241E]/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
           <div className="bg-[#FAF7F2] text-[#2D241E] w-full max-w-xs rounded-[28px] p-6 shadow-2xl border-2 border-[#EADFCF] flex flex-col gap-4 text-center animate-in zoom-in-95 duration-150">
@@ -971,6 +948,20 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     </>
   );
 
+  // 💡 1. 최초 데이터 로딩 중일 때 표시할 화면 (깜빡임 완벽 차단)
+  if (isInitialLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[65vh] gap-4 animate-in fade-in duration-200">
+        <div className="w-10 h-10 border-4 border-[#EADFCF] border-t-[#C25E3E] rounded-full animate-spin" />
+        <div className="text-center">
+          <p className="font-title text-base text-[#2D241E]">약속 방을 불러오는 중입니다...</p>
+          <p className="font-body text-xs text-[#8C7A6B] mt-1">참여 중인 약속 지도를 찾고 있어요 📍</p>
+        </div>
+      </div>
+    );
+  }
+
+  // 💡 2. 데이터 조회가 끝났는데도 참여 중인 방이 전혀 없을 때만 표시
   if (rooms.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-[65vh] gap-6 animate-in fade-in duration-300">
@@ -1011,20 +1002,20 @@ export default function DateMap({ externalNewPlace }: DateMapProps) {
     );
   }
 
-const roomGroups: GroupItem[] = [
-  ...DEFAULT_GROUPS,
-  ...(currentRoom?.groups || []).filter((g) => g.name !== '기본 그룹'),
-];
+  const roomGroups: GroupItem[] = [
+    ...DEFAULT_GROUPS,
+    ...(currentRoom?.groups || []).filter((g) => g.name !== '기본 그룹'),
+  ];
 
-const filterPlaces = (p: Place) => {
-  if (selectedGroup === '전체') return true;
+  const filterPlaces = (p: Place) => {
+    if (selectedGroup === '전체') return true;
 
-  if (selectedGroup === '기본 찜') {
-    return !p.group || p.group === '기본 찜';
-  }
+    if (selectedGroup === '기본 찜') {
+      return !p.group || p.group === '기본 찜';
+    }
 
-  return (p.group || '').trim() === selectedGroup.trim();
-};
+    return (p.group || '').trim() === selectedGroup.trim();
+  };
 
   let activeColorId = 'pastel-pink';
   if (selectedGroup === '기본 찜') {
@@ -1310,7 +1301,7 @@ const filterPlaces = (p: Place) => {
             className={`font-title px-3.5 py-1.5 rounded-xl text-xs transition whitespace-nowrap active:scale-95 ${
               selectedGroup === '기본 찜'
                 ? 'bg-[#2D241E] text-[#F3D5B5] border-[#2D241E]'
-                : 'bg-white text-[#7A6251] border-[#EADFCF] hover:bg-[#FAF7F2]'
+                : 'bg-white text-[#7A6251] border-2 border-[#EADFCF] hover:bg-[#FAF7F2]'
             }`}
           >
             🤍 기본 찜
